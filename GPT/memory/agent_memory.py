@@ -28,6 +28,10 @@ class AgentMemory(BaseModel):
         """Добавляет ответ пользователя"""
         self.user_responses.append(response)
     
+    def save_response(self, response: UserResponse):
+        """Сохраняет ответ пользователя (алиас для add_user_response)"""
+        self.add_user_response(response)
+    
     def add_page_context(self, context: PageContext):
         """Добавляет контекст страницы"""
         self.page_contexts.append(context)

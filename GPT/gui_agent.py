@@ -24,7 +24,12 @@ class AgentGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("AI Document Creator Agent - MVP")
-        self.root.geometry("800x600")
+        self.root.geometry("900x700")
+        
+        # Настройка стилей
+        style = ttk.Style()
+        style.configure("Large.TButton", font=("Arial", 14, "bold"), padding=15)
+        style.configure("ExtraLarge.TButton", font=("Arial", 16, "bold"), padding=20)
         
         # Очередь для сообщений от агента
         self.message_queue = queue.Queue()
@@ -47,7 +52,7 @@ class AgentGUI:
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(0, weight=1)
         main_frame.columnconfigure(1, weight=1)
-        main_frame.rowconfigure(2, weight=1)
+        main_frame.rowconfigure(3, weight=1)  # Логи должны расширяться
         
         # Заголовок
         title_label = ttk.Label(main_frame, text="🤖 AI Document Creator Agent", 
@@ -70,14 +75,14 @@ class AgentGUI:
         
         # Кнопки управления
         button_frame = ttk.Frame(main_frame)
-        button_frame.grid(row=2, column=0, columnspan=2, pady=(0, 10))
+        button_frame.grid(row=2, column=0, columnspan=2, pady=(10, 20))
         
         self.start_button = ttk.Button(button_frame, text="🚀 Запустить агента", 
-                                      command=self.start_agent)
-        self.start_button.pack(side=tk.LEFT, padx=(0, 10))
+                                      command=self.start_agent, style="ExtraLarge.TButton")
+        self.start_button.pack(side=tk.LEFT, padx=(0, 20))
         
         self.stop_button = ttk.Button(button_frame, text="⏹️ Остановить", 
-                                     command=self.stop_agent, state=tk.DISABLED)
+                                     command=self.stop_agent, state=tk.DISABLED, style="ExtraLarge.TButton")
         self.stop_button.pack(side=tk.LEFT)
         
         # Область логов
@@ -86,24 +91,137 @@ class AgentGUI:
         log_frame.columnconfigure(0, weight=1)
         log_frame.rowconfigure(0, weight=1)
         
-        self.log_text = scrolledtext.ScrolledText(log_frame, height=20, width=80)
+        self.log_text = scrolledtext.ScrolledText(log_frame, height=12, width=80)
         self.log_text.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        
+        # Область для диалога с юристом
+        dialog_frame = ttk.LabelFrame(main_frame, text="Диалог с юристом", padding="10")
+        dialog_frame.grid(row=4, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(10, 0))
+        dialog_frame.columnconfigure(0, weight=1)
+        dialog_frame.rowconfigure(0, weight=1)
+        
+        # Область диалога
+        self.dialog_text = scrolledtext.ScrolledText(dialog_frame, height=8, width=80)
+        self.dialog_text.grid(row=0, column=0, columnspan=2, sticky=(tk.W, tk.E, tk.N, tk.S), pady=(0, 10))
+        
+        # Фрейм для ввода ответа
+        input_frame = ttk.Frame(dialog_frame)
+        input_frame.grid(row=1, column=0, columnspan=2, sticky=(tk.W, tk.E))
+        input_frame.columnconfigure(0, weight=1)
+        
+        # Поле для ввода ответа
+        self.answer_var = tk.StringVar()
+        self.answer_entry = ttk.Entry(input_frame, textvariable=self.answer_var, state=tk.DISABLED)
+        self.answer_entry.grid(row=0, column=0, sticky=(tk.W, tk.E), padx=(0, 10))
+        
+        # Кнопка отправки
+        self.send_button = ttk.Button(input_frame, text="Отправить", command=self.send_answer, state=tk.DISABLED)
+        self.send_button.grid(row=0, column=1)
+        
+        # Очередь для ответов
+        self.answer_queue = queue.Queue()
+        self.current_question = None
+        
+        # Переменные для диалога
+        self.dialog_active = False
+        self.lawyer_context = {}  # Контекст для юриста (поля формы, шаблоны и т.д.)
+        
+        # Привязываем Enter к отправке ответа
+        self.answer_entry.bind('<Return>', lambda e: self.send_answer())
         
         # Статус
         self.status_var = tk.StringVar(value="Готов к запуску")
         status_label = ttk.Label(main_frame, textvariable=self.status_var, 
                                 font=("Arial", 10, "bold"))
-        status_label.grid(row=4, column=0, columnspan=2, pady=(10, 0))
+        status_label.grid(row=5, column=0, columnspan=2, pady=(10, 0))
+        
+        # Отладочная информация - показываем что кнопки созданы
+        print("GUI Setup Complete - Buttons should be visible")
+        print(f"Start button: {self.start_button}")
+        print(f"Stop button: {self.stop_button}")
+        
+        # Принудительно обновляем GUI
+        self.root.update()
+        self.root.deiconify()  # Убеждаемся что окно видимо
         
     def setup_agent(self):
         """Настройка агента"""
         self.agent = None
-        self.driver = None
-        self.agent_thread = None
         self.is_running = False
+        self.current_question = None
+        self.answer_queue = queue.Queue()
+    
+    def ask_question(self, question: str) -> str:
+        """Показывает вопрос пользователю и ждет ответа"""
+        self.current_question = question
         
+        # Добавляем вопрос в диалог
+        self.dialog_text.insert(tk.END, f"🤖 Юрист: {question}\n")
+        self.dialog_text.see(tk.END)
+        
+        # Активируем поле ввода
+        self.answer_entry.config(state=tk.NORMAL)
+        self.send_button.config(state=tk.NORMAL)
+        self.answer_entry.focus()
+        
+        # Ждем ответа от пользователя
+        try:
+            answer = self.answer_queue.get(timeout=300)  # 5 минут таймаут
+            return answer
+        except queue.Empty:
+            return ""
+        finally:
+            # Очищаем поле ввода
+            self.answer_var.set("")
+            self.answer_entry.config(state=tk.DISABLED)
+            self.send_button.config(state=tk.DISABLED)
+            self.current_question = None
+    
+    def send_answer(self):
+        """Отправляет ответ пользователя"""
+        answer = self.answer_var.get().strip()
+        if answer and self.current_question:
+            # Добавляем ответ в диалог
+            self.dialog_text.insert(tk.END, f"💬 Вы: {answer}\n")
+            self.dialog_text.see(tk.END)
+            
+            # Отправляем ответ в очередь
+            self.answer_queue.put(answer)
+            
+                        # Очищаем поле ввода
+            self.answer_var.set("")
+    
+    def start_lawyer_dialog(self, context: dict = None):
+        """Начинает диалог с юристом"""
+        self.dialog_active = True
+        if context:
+            self.lawyer_context = context
+        
+        # Очищаем диалог
+        self.dialog_text.delete(1.0, tk.END)
+        self.dialog_text.insert(tk.END, "🤖 Юрист готов помочь вам с созданием документа.\n")
+        self.dialog_text.see(tk.END)
+        
+        # Активируем поле ввода
+        self.answer_entry.config(state=tk.NORMAL)
+        self.send_button.config(state=tk.NORMAL)
+        self.answer_entry.focus()
+    
+    def end_lawyer_dialog(self):
+        """Завершает диалог с юристом"""
+        self.dialog_active = False
+        self.answer_entry.config(state=tk.DISABLED)
+        self.send_button.config(state=tk.DISABLED)
+        self.dialog_text.insert(tk.END, "🤖 Диалог завершен.\n")
+        self.dialog_text.see(tk.END)
+    
+    def lawyer_say(self, message: str):
+        """Юрист говорит что-то пользователю"""
+        self.dialog_text.insert(tk.END, f"🤖 Юрист: {message}\n")
+        self.dialog_text.see(tk.END)
+    
     def log_message(self, message):
-        """Добавляет сообщение в лог"""
+        """Добавляет сообщение в лог (без фильтрации)"""
         self.log_text.insert(tk.END, f"{message}\n")
         self.log_text.see(tk.END)
         self.root.update_idletasks()
@@ -170,6 +288,9 @@ class AgentGUI:
             # Создание агента
             self.agent = MainAgent(self.driver, credentials)
             
+            # Устанавливаем callback для взаимодействия с GUI
+            self.agent.set_gui_callback(self.ask_question)
+            
             # Переопределяем print для перенаправления в GUI
             original_print = print
             def gui_print(*args, **kwargs):
@@ -184,12 +305,14 @@ class AgentGUI:
             try:
                 # Запуск рабочего процесса
                 self.message_queue.put("🚀 Starting AI Document Creator Agent...")
+                
+                # Вызываем run_workflow с URL
                 success = self.agent.run_workflow(Config.BASE_URL)
                 
                 if success:
                     self.message_queue.put("✅ Document creation completed successfully!")
                 else:
-                    self.message_queue.put("⚠️ Document creation failed, but agent continues running...")
+                    self.message_queue.put("❌ Document creation failed")
                     
             except Exception as e:
                 self.message_queue.put(f"❌ Workflow error: {str(e)}")

@@ -6,8 +6,7 @@ class PageState(str, Enum):
     """Состояния страницы в процессе работы"""
     LOGIN = "login"
     PAGE_1 = "page_1"  # Главная страница после авторизации (Home)
-    PAGE_2 = "page_2"  # Страница Documents
-    NEW_DOCUMENT = "new_document"
+    DOCUMENTS_PAGE = "documents_page"  # Страница Documents
     PRELIMINARY_DATA = "preliminary_data"
     CREATE_FROM_TEMPLATE = "create_from_template"
     TEMPLATE_SELECTION = "template_selection"
@@ -15,6 +14,13 @@ class PageState(str, Enum):
     FILE_UPLOAD = "file_upload"
     COMPLETION = "completion"
     ERROR = "error"
+
+# Флаги для состояний, требующих обязательного ввода пользователя
+REQUIRES_USER_INPUT = {
+    PageState.PRELIMINARY_DATA: True,
+    PageState.TEMPLATE_SELECTION: True,
+    PageState.DOCUMENT_FILLING: True
+}
 
 class ActionType(str, Enum):
     """Типы действий агента"""

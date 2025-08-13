@@ -62,12 +62,49 @@ class SeleniumTool(BaseTool):
             # Добавляем credentials из контекста, если они есть
             if 'credentials' in context:
                 exec_globals['credentials'] = context['credentials']
+            # Добавляем user_data из контекста, если оно есть
+            if 'user_data' in context:
+                exec_globals['user_data'] = context['user_data']
             
-            # Выполнение кода
-            exec(code, exec_globals)
+            # Логируем код перед выполнением
+            print(f"🔍 EXECUTING SELENIUM CODE:")
+            print(f"🔍 CODE LENGTH: {len(code)}")
+            print(f"🔍 CODE: {code}")
+            
+            # Перехватываем вывод print для проверки ошибок
+            import io
+            import sys
+            old_stdout = sys.stdout
+            captured_output = io.StringIO()
+            sys.stdout = captured_output
+            
+            try:
+                # Выполнение кода
+                exec(code, exec_globals)
+            finally:
+                # Восстанавливаем stdout
+                sys.stdout = old_stdout
+                captured_output.seek(0)
+                output = captured_output.read()
+                print(f"🔍 CAPTURED OUTPUT: {output}")
+                
+                # Проверяем, есть ли в выводе сообщения об ошибках
+                if any(error_keyword in output for error_keyword in [
+                    "An error occurred:", "TimeoutException", "NoSuchElementException",
+                    "ElementNotInteractableException", "StaleElementReferenceException",
+                    "WebDriverException", "InvalidSelectorException"
+                ]):
+                    print(f"🔍 ERROR DETECTED IN OUTPUT")
+                    return {
+                        "success": False,
+                        "error": f"Code executed but encountered an error: {output.strip()}",
+                        "error_type": "execution"
+                    }
             
             # Проверяем, не было ли ошибок в коде
             # Если код выполнился без исключений, считаем успешным
+            print(f"🔍 SELENIUM CODE EXECUTED SUCCESSFULLY")
+            
             return {
                 "success": True,
                 "message": "Code executed successfully",
