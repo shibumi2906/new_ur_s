@@ -5,8 +5,9 @@ from langchain.schema import HumanMessage, SystemMessage
 import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config import Config
-from models import PageContext, PageState
+from ..config import Config
+from ..models import PageContext, PageState
+
 
 class NavigatorAgent:
     """Агент для определения текущего состояния страницы"""
@@ -57,8 +58,8 @@ class NavigatorAgent:
         # Проверяем URL для определения страницы выбора опций создания документа
         if "/create-contract/options" in context.current_url:
             return {
-                "state": PageState.DOCUMENTS_PAGE,
-                "analysis": "Мы на странице выбора опций создания документа. Нужно найти кнопку 'Create from template'.",
+                "state": PageState.CREATE_FROM_TEMPLATE,
+                "analysis": "Мы на странице выбора опций создания документа. Нужно найти и нажать кнопку 'Create from template'.",
                 "needs_user_input": False,
                 "is_authenticated": True
             }

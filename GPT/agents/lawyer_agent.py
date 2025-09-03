@@ -7,7 +7,7 @@ import os
 import time
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import Config
-from models import PageContext, UserResponse
+from ..models import PageContext, UserResponse
 
 
 
@@ -51,12 +51,6 @@ class LawyerAgent:
     def _run(self, context: Dict[str, Any]) -> Dict[str, Any]:
         """Основной метод для обработки диалога с пользователем"""
         try:
-            # Получаем системный промпт от MainAgent, если он передан
-            system_prompt = context.get('system_prompt', None)
-            if system_prompt:
-                print(f"🔍 LAWYER AGENT: Received system prompt from MainAgent")
-                print(f"🔍 LAWYER AGENT: System prompt preview: {system_prompt[:200]}...")
-            
             # Если это новый набор вопросов, сбрасываем индекс
             if not self.all_questions:
                 self.all_questions = self._generate_questions_from_form(context)
@@ -110,12 +104,6 @@ class LawyerAgent:
                 if not user_answer:
                     return {"success": False, "error": "No user input received"}
                 
-                # ВАЖНО: Если есть системный промпт от MainAgent, используем extract_form_data()
-                system_prompt = context.get('system_prompt', None)
-                if system_prompt and 'extract_form_data' in system_prompt:
-                    self._call_extract_form_data(user_answer, current_question_type, context)
-                    print(f"🔍 LAWYER AGENT: Called extract_form_data for '{current_question_type}' with answer '{user_answer}'")
-                
                 # Если пользователь задает встречный вопрос — отвечаем и повторяем исходный вопрос
                 if self._is_user_question(user_answer):
                     assistant_reply = self._answer_user_question(user_answer, context, current_question_type)
@@ -139,10 +127,11 @@ class LawyerAgent:
                         # Продолжаем цикл без сохранения ответа и без увеличения индекса
                         continue
                 
-                # Ответ валиден — сохраняем и выходим из цикла
+                # Ответ валиден — нормализуем и сохраняем
+                normalized_answer = self._normalize_user_answer(user_answer, current_question_type)
                 response = UserResponse(
                     question=formatted_question,
-                    answer=user_answer,
+                    answer=normalized_answer,
                     timestamp=time.time()
                 )
                 self.user_responses.append(response)
@@ -160,9 +149,21 @@ class LawyerAgent:
             else:
                 all_completed = False
             
+            # Создаем маппинг для полей
+            field_name_map = {
+                "document_name": "document_name",
+                "document_language": "document_language", 
+                "document_number": "document_number",
+                "add_to_project": "add_to_project"
+            }
+            field_name = field_name_map.get(current_question_type)
+            
             return {
                 "success": True,
+                "immediate_fill": True,          # сигнал MainAgent для немедленного заполнения
+                "field_name": field_name,        # какое поле заполнять
                 "all_completed": all_completed,
+                "question_asked": True,
                 "question": formatted_question,
                 "answer": user_answer,
                 "legal_formulation": self._generate_legal_formulation(user_answer, context)
@@ -230,7 +231,7 @@ class LawyerAgent:
         return questions
     
     def _format_question(self, question: str, context: Dict[str, Any]) -> str:
-        """Форматирует вопрос в вежливой и профессиональной форме"""
+        """Форматирует вопрос в вежливой и профессиональной форме с триггерами полей"""
         # Анализируем поля формы на странице
         form_fields = self._analyze_form_fields(context)
         
@@ -238,30 +239,41 @@ class LawyerAgent:
         field_type = self._identify_field_type(question)
         
         if field_type == "document_name":
-            return "Введите название документа:"  # Изменено с "название файла" на "название документа"
+            return "Введите название файла: [FIELD:document_name]"
         elif field_type == "document_language":
-            return "Выберите язык документа:"
+            return "Выберите язык документа: [FIELD:document_language]"
         elif field_type == "document_number":
-            return "Введите номер документа (необязательно):"
+            return "Введите номер документа (необязательно): [FIELD:document_number]"
         elif field_type == "add_to_project":
-            return "Выберите проект (необязательно):"
+            return "Выберите проект (необязательно): [FIELD:add_to_project]"
         else:
-            return question
+            return f"{question} [FIELD:unknown]"
     
     def _identify_field_type(self, question: str) -> str:
-        """Определяет тип поля на основе вопроса"""
-        question_lower = question.lower()
-        
-        if any(keyword in question_lower for keyword in ["название", "наименование", "document name", "title"]):
+        """Определяет тип поля на основе вопроса с поддержкой snake_case"""
+        q = (question or "").strip().lower()
+        # Нормализуем snake_case -> пробелы
+        q_norm = q.replace("_", " ")
+
+        # Прямые токены тоже считаем валидными
+        if q in {"document_name", "document language", "document_number", "add_to_project"}:
+            # сопоставим токены точным именам
+            return {
+                "document_name": "document_name",
+                "document language": "document_language",
+                "document_number": "document_number",
+                "add_to_project": "add_to_project",
+            }[q]
+
+        if any(k in q or k in q_norm for k in ["название", "наименование", "document name", "title", "название файла"]):
             return "document_name"
-        elif any(keyword in question_lower for keyword in ["язык", "language"]):
+        if any(k in q or k in q_norm for k in ["язык", "language", "язык документа", "выберите язык"]):
             return "document_language"
-        elif any(keyword in question_lower for keyword in ["номер", "number"]):
+        if any(k in q or k in q_norm for k in ["номер", "number"]):
             return "document_number"
-        elif any(keyword in question_lower for keyword in ["проект", "project"]):
+        if any(k in q or k in q_norm for k in ["проект", "project"]):
             return "add_to_project"
-        else:
-            return "unknown"
+        return "unknown"
     
     def _generate_legal_formulation(self, user_answer: str, context: Dict[str, Any]) -> str:
         """Генерирует юридически корректную формулировку на основе ответа пользователя"""
@@ -306,16 +318,15 @@ class LawyerAgent:
             print(f"🔍 Checking response: '{question_lower}' -> '{answer_lower}'")
             
             # Проверяем название документа
-            if (any(keyword in question_lower for keyword in ["название", "наименование", "document name", "title"]) or
-                "document_name" in question_lower or
-                "название файла" in question_lower):
+            if (any(keyword in question_lower for keyword in ["название", "наименование", "document name", "title", "название файла"]) or
+                "document_name" == question_lower.strip()):
                 if answer_lower and answer_lower not in ["skip", "пропустить", "нет", "no", ""]:
                     required_fields["document_name"] = True
                     print(f"✅ Document name found: {answer_lower}")
             
             # Проверяем язык документа
-            if (any(keyword in question_lower for keyword in ["язык", "language"]) or
-                "язык документа" in question_lower):
+            if (any(keyword in question_lower for keyword in ["язык", "language", "язык документа", "выберите язык"]) or
+                "document_language" == question_lower.strip()):
                 if answer_lower and answer_lower not in ["skip", "пропустить", "нет", "no", ""]:
                     required_fields["document_language"] = True
                     print(f"✅ Document language found: {answer_lower}")
@@ -484,31 +495,6 @@ class LawyerAgent:
         # Общий ответ — вежливо попросить конкретизировать
         return "Спасибо за вопрос! Поясните, пожалуйста, чтобы я мог помочь. Если готовы, дайте конкретный ответ на мой вопрос выше."
 
-    def _call_extract_form_data(self, user_answer: str, question_type: str, context: Dict[str, Any]) -> None:
-        """Вызывает extract_form_data() как требует системный промпт MainAgent"""
-        try:
-            # Импортируем MainAgent для доступа к методу extract_form_data
-            import sys
-            import os
-            sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-            
-            # Создаем временный экземпляр MainAgent для вызова extract_form_data
-            from .main_agent import MainAgent
-
-            temp_agent = MainAgent(None, {})  # Временный экземпляр
-            
-            # Вызываем extract_form_data
-            extracted_data = temp_agent.extract_form_data(user_answer, question_type)
-            print(f"🔍 LAWYER AGENT: extract_form_data returned: {extracted_data}")
-            
-            # Сохраняем данные в контексте для передачи обратно в MainAgent
-            if 'extracted_data' not in context:
-                context['extracted_data'] = {}
-            context['extracted_data'].update(extracted_data)
-            
-        except Exception as e:
-            print(f"🔍 LAWYER AGENT: Error calling extract_form_data: {e}")
-
     def _extract_language_options(self, context: Dict[str, Any]) -> list:
         """Извлекает список доступных языков из HTML страницы, если удается"""
         html = context.get('body_html', '') or ''
@@ -532,4 +518,44 @@ class LawyerAgent:
             if k not in seen:
                 seen.add(k)
                 unique.append(v)
-        return unique 
+        return unique
+    
+    def _normalize_user_answer(self, answer: str, question_type: str) -> str:
+        """Нормализует ответ пользователя в соответствии с требованиями формы"""
+        answer = answer.strip()
+        
+        # Для языков - переводим на правильный английский формат
+        if question_type == "document_language":
+            answer_lower = answer.lower()
+            language_map = {
+                # Русские варианты
+                'английский': 'English',
+                'англ': 'English', 
+                'русский': 'Russian',
+                'рус': 'Russian',
+                'немецкий': 'German', 
+                'нем': 'German',
+                'французский': 'French',
+                'франц': 'French',
+                'испанский': 'Spanish',
+                'исп': 'Spanish',
+                # Английские варианты
+                'english': 'English',
+                'russian': 'Russian', 
+                'german': 'German',
+                'french': 'French',
+                'spanish': 'Spanish',
+                # Сокращения
+                'en': 'English',
+                'ru': 'Russian',
+                'de': 'German', 
+                'fr': 'French',
+                'es': 'Spanish'
+            }
+            
+            if answer_lower in language_map:
+                normalized = language_map[answer_lower]
+                print(f"🔧 LAWYER: Нормализовал язык '{answer}' → '{normalized}'")
+                return normalized
+        
+        return answer 

@@ -11,10 +11,9 @@ from webdriver_manager.chrome import ChromeDriverManager
 from langchain.tools import BaseTool
 from pydantic import BaseModel, Field
 
-import sys
-import os
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from models import PageContext, AgentAction, ActionType
+# относительный импорт внутри пакета GPT
+from ..models import PageContext, AgentAction, ActionType
+
 
 class SeleniumToolInput(BaseModel):
     code: str = Field(description="Python Selenium code to execute")
@@ -87,7 +86,7 @@ class SeleniumTool(BaseTool):
                 captured_output.seek(0)
                 output = captured_output.read()
                 print(f"🔍 CAPTURED OUTPUT: {output}")
-                
+
                 # Проверяем, есть ли в выводе сообщения об ошибках
                 if any(error_keyword in output for error_keyword in [
                     "An error occurred:", "TimeoutException", "NoSuchElementException",

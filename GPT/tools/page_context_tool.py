@@ -6,8 +6,14 @@ from pydantic import BaseModel, Field
 
 import sys
 import os
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from models import PageContext
+from typing import Any, Dict
+from selenium.common.exceptions import (
+    TimeoutException, NoSuchElementException, WebDriverException,
+    ElementClickInterceptedException, StaleElementReferenceException
+)
+# относительный импорт внутри пакета GPT:
+from ..models import PageContext
+
 
 class PageContextToolInput(BaseModel):
     driver: Any = Field(description="Selenium WebDriver instance")

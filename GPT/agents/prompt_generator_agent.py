@@ -2,11 +2,9 @@ from typing import Dict, Any, List
 from langchain_openai import ChatOpenAI
 from langchain.schema import HumanMessage, SystemMessage
 
-import sys
-import os
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config import Config
-from models import PageContext, PageState, AgentAction
+from ..config import Config
+from ..models import PageContext, PageState, AgentAction, ActionType
+
 
 class PromptGeneratorAgent:
     """Агент для генерации промптов для LLM"""
@@ -325,24 +323,18 @@ class PromptGeneratorAgent:
         
         **КРИТИЧЕСКИ ВАЖНО: МЫ НА СТРАНИЦЕ ПРЕДВАРИТЕЛЬНЫХ ДАННЫХ!**
         
-        **ВАША ЕДИНСТВЕННАЯ ЗАДАЧА:** ЗАПРОСИТЬ данные у пользователя через секцию ```questions```
+        **ВАША ЗАДАЧА:** ЗАПРОСИТЬ данные у пользователя и заполнить форму
         
-        **ЗАПРЕЩЕНО:**
-        - ❌ Заполнять форму автоматически
-        - ❌ Генерировать код Python для заполнения полей
-        - ❌ Нажимать кнопки на странице
-        - ❌ Выполнять любые действия с формой
-        
-        **ОБЯЗАТЕЛЬНО:**
-        - ✅ Сгенерировать секцию ```questions``` с вопросами
-        - ✅ Запросить информацию у пользователя
-        - ✅ Дождаться ответов пользователя
+        **ПОСЛЕДОВАТЕЛЬНОСТЬ ДЕЙСТВИЙ:**
+        1. ✅ Сгенерировать секцию ```questions``` с вопросами и триггерами полей
+        2. ✅ Дождаться ответов пользователя от LawyerAgent
+        3. ✅ Сгенерировать Selenium код для заполнения формы полученными данными
+        4. ✅ Нажать кнопку "Continue" для перехода на следующую страницу
         
         **ВАЖНО О ПОЛЯХ ФОРМЫ:**
-        - Поля формы заполняются данными, полученными от юриста
-        - Юрист транслирует вопросы из формы пользователю
-        - Юрист получает ответы пользователя и передает их для заполнения полей
-        - Юрист может вступить в диалог, если пользователь что-то спросит
+        - Поля формы заполняются данными, полученными от пользователя через LawyerAgent
+        - Триггеры [FIELD:xxx] используются для извлечения данных из ответов
+        - После заполнения всех полей нужно нажать "Continue"
         
         **ПРИМЕРЫ ВОПРОСОВ ДЛЯ ЗАПРОСА:**
         - Название документа (обязательное)
@@ -358,18 +350,24 @@ class PromptGeneratorAgent:
         **СТРУКТУРА ОТВЕТА (ОБЯЗАТЕЛЬНО):**
         ```
         questions
-        Вопрос 1: Какое название документа вам нужно? (обязательное поле)
-        Вопрос 2: На каком языке должен быть документ? (обязательное поле)
-        Вопрос 3: Нужен ли номер документа? (необязательное поле)
-        Вопрос 4: К какому проекту следует добавить документ? (необязательное поле)
+        Вопрос 1: Какое название документа вам нужно? (обязательное поле) [FIELD:document_name]
+        Вопрос 2: На каком языке должен быть документ? (обязательное поле) [FIELD:document_language]
+        Вопрос 3: Нужен ли номер документа? (необязательное поле) [FIELD:document_number]
+        Вопрос 4: К какому проекту следует добавить документ? (необязательное поле) [FIELD:add_to_project]
         ```
         
+            **КРИТИЧЕСКИ ВАЖНО - ТРИГГЕРЫ ПОЛЕЙ:**
+    - ОБЯЗАТЕЛЬНО добавляйте триггер [FIELD:xxx] к каждому вопросу
+    - БЕЗ триггеров система НЕ сможет заполнить поля формы
+    - Триггеры должны быть точно в формате [FIELD:document_name], [FIELD:document_language], etc.
+    - НЕ изменяйте формат триггеров!
+    - ВСЕ вопросы должны иметь такую форму: формулировка вопроса [FIELD:xxx]
+        
         **ВАЖНО:** 
-        - ВСЕГДА используйте секцию ```questions```
-        - НЕ генерируйте код Python
-        - НЕ заполняйте форму
-        - ТОЛЬКО вопросы пользователю
-        - После получения ответов юрист продолжит разговор для выяснения типа документа
+        - ВСЕГДА используйте секцию ```questions``` для запроса данных
+        - После получения ответов система автоматически заполнит форму
+        - После заполнения формы система нажмет "Continue"
+        - ТОЛЬКО вопросы пользователю с триггерами полей
         """
     
     def _generate_create_from_template_prompt(self, base_prompt: str, context: PageContext) -> str:
@@ -381,6 +379,12 @@ class PromptGeneratorAgent:
         
         **Текущая задача:** Найти и нажать кнопку "Create from template" на странице выбора опций
         
+        **КРИТИЧЕСКИ ВАЖНО - ПРАВИЛА XPath:**
+        - В XPath используй ТОЛЬКО двойные кавычки для строк: contains(text(), "text")
+        - НИКОГДА не используй одинарные кавычки внутри XPath: contains(text(), 'text') - ЭТО ОШИБКА!
+        - Правильно: //button[contains(text(), "Create from template")]
+        - Неправильно: //button[contains(text(), 'Create from template')]
+        
         **Требования для навигации:** 
         - Используй только мой уже открытый драйвер driver.get(url)
         - Не используй переходы по разным ссылкам, взаимодействуй только с элементами страницы
@@ -391,7 +395,7 @@ class PromptGeneratorAgent:
         - Базовый URL сайта https://app.conneto.com/
         - Не закрывайте драйвер
         - Использовать явные ожидания (WebDriverWait до 10 секунд)
-        - Используй только XPath для поиска элементов по тексту (НЕ используйте CSS :contains)
+        - Используй XPath для поиска элементов по тексту
         - Не учитывай поле для поиска как поле для заполнения данных
         - Не отправляйте код на Python и вопросы в одном ответе
         - Используйте обработку исключений
@@ -399,11 +403,25 @@ class PromptGeneratorAgent:
         - Не забудьте закрыть скобки в сгенерированном коде
         
         **ПРИМЕРЫ XPath для поиска кнопки "Create from template" (попробуй в этом порядке):**
-        1. //*[contains(translate(normalize-space(.),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'create from template')]/ancestor-or-self::*[self::button or self::a][1]
-        2. //button[.//text()[contains(translate(normalize-space(.),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'create from template')]]
-        3. //a[.//text()[contains(translate(normalize-space(.),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'create from template')]]
-        4. //*[contains(translate(normalize-space(.),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'создать из шаблона')]/ancestor-or-self::*[self::button or self::a][1]
-        5. //*[contains(@class,'btn') or contains(@class,'button')]//*[contains(translate(normalize-space(.),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'create from template')]
+        1. //button[contains(text(), "Create from template")]
+        2. //a[contains(text(), "Create from template")]
+        3. //span[contains(text(), "Create from template")]
+        4. //div[contains(text(), "Create from template")]
+        5. //*[contains(text(), "Create from template")]
+        6. //button[contains(text(), "create from template")]
+        7. //a[contains(text(), "create from template")]
+        8. //*[contains(@class, "btn") and contains(text(), "Create from template")]
+        9. //*[contains(@class, "button") and contains(text(), "Create from template")]
+        10. //*[contains(@data-testid, "create-template")]
+        11. //*[contains(@aria-label, "Create from template")]
+        12. //*[contains(@title, "Create from template")]
+        
+        **CSS SELECTOR EXAMPLES (если XPath не работает):**
+        1. button:contains("Create from template")
+        2. a:contains("Create from template")
+        3. [data-testid*="create-template"]
+        4. [aria-label*="Create from template"]
+        5. [title*="Create from template"]
         
         **ВАЖНО:** 
         - Кнопка "Create from template" находится в карточке "Choose a template"
@@ -413,7 +431,7 @@ class PromptGeneratorAgent:
         - Выведи текущий URL и заголовок страницы для отладки
         - Выведи список всех кликабельных элементов на странице
         - После клика ЖДИ смену URL на /create-contract/details или /create-contract/templates (timeout 15s)
-        - Если URL не поменялся — скроль к кнопке, кликни JS (driver.execute_script('arguments[0].click();', el)) и повтори ожидание
+        - Если URL не поменялся — скроль к кнопке, кликни JS (driver.execute_script("arguments[0].click();", el)) и повтори ожидание
         """
     
     def _generate_preliminary_form_filling_prompt(self, base_prompt: str, context: PageContext, user_responses: List[Dict] = None) -> str:
@@ -423,22 +441,37 @@ class PromptGeneratorAgent:
         user_data = {}
         if user_responses:
             for response in user_responses:
-                question = response.get('question', '').lower()
+                question = response.get('question', '')
                 answer = response.get('answer', '')
                 
-                # Заполняем только те поля, на которые пользователь действительно ответил
-                if any(keyword in question for keyword in ["название", "наименование", "document name"]):
-                    user_data['document_name'] = answer
-                elif any(keyword in question for keyword in ["язык", "language"]):
-                    user_data['document_language'] = answer
-                elif any(keyword in question for keyword in ["номер", "number"]):
-                    # Заполняем номер только если пользователь дал конкретный ответ
-                    if answer and answer.strip() and answer.lower() not in ["skip", "пропустить", "нет", "no", ""]:
-                        user_data['document_number'] = answer
-                elif any(keyword in question for keyword in ["проект", "project"]):
-                    # Заполняем проект только если пользователь дал конкретный ответ
-                    if answer and answer.strip() and answer.lower() not in ["skip", "пропустить", "нет", "no", ""]:
-                        user_data['add_to_project'] = answer
+                # Сначала пытаемся извлечь триггер поля
+                import re
+                field_match = re.search(r'\[FIELD:(\w+)\]', question)
+                if field_match:
+                    field_name = field_match.group(1)
+                    user_data[field_name] = answer
+                else:
+                    # Fallback на старый метод с ключевыми словами
+                    question_lower = question.lower().strip()
+                    
+                    # Проверяем точные ключи сначала
+                    if question_lower == "document_name":
+                        user_data['document_name'] = answer
+                    elif question_lower == "document_language":
+                        user_data['document_language'] = answer
+                    # Заполняем только те поля, на которые пользователь действительно ответил
+                    elif any(keyword in question_lower for keyword in ["название", "наименование", "document name"]):
+                        user_data['document_name'] = answer
+                    elif any(keyword in question_lower for keyword in ["язык", "language"]):
+                        user_data['document_language'] = answer
+                    elif any(keyword in question_lower for keyword in ["номер", "number"]):
+                        # Заполняем номер только если пользователь дал конкретный ответ
+                        if answer and answer.strip() and answer.lower() not in ["skip", "пропустить", "нет", "no", ""]:
+                            user_data['document_number'] = answer
+                    elif any(keyword in question_lower for keyword in ["проект", "project"]):
+                        # Заполняем проект только если пользователь дал конкретный ответ
+                        if answer and answer.strip() and answer.lower() not in ["skip", "пропустить", "нет", "no", ""]:
+                            user_data['add_to_project'] = answer
         
         user_data_str = "\n".join([f"- {key}: {value}" for key, value in user_data.items()])
         
@@ -459,7 +492,7 @@ class PromptGeneratorAgent:
         
         **ВАЖНО О ПОЛЯХ ФОРМЫ:**
         - Document name * (обязательное) - использовать ответ пользователя о названии
-        - Document language * (обязательное) - использовать ответ пользователя о языке
+        - Document language * (обязательное) - использовать ответ пользователя о языке (языки уже переведены юристом в правильный формат)
         - Document number (необязательное) - заполнять ТОЛЬКО если пользователь дал конкретный ответ
         - Add to project (необязательное) - заполнять ТОЛЬКО если пользователь дал конкретный ответ
         
@@ -503,6 +536,9 @@ class PromptGeneratorAgent:
         # Данные пользователя (заполнять только те, которые есть)
         document_name = user_data.get('document_name', '')
         document_language = user_data.get('document_language', '')
+        
+
+        
         document_number = user_data.get('document_number', '')  # Только если пользователь указал
         add_to_project = user_data.get('add_to_project', '')  # Только если пользователь указал
         
@@ -561,17 +597,18 @@ class PromptGeneratorAgent:
                         time.sleep(1)
                         
                         # Ищем опцию с нужным языком
-                        option_selectors = [
-                                                    f"li[role='option']:contains('{{document_language}}')",
-                        f"option:contains('{{document_language}}')",
-                        f"[role='option']:contains('{{document_language}}')",
-                        f"li:contains('{{document_language}}')"
+                        # Используем XPath вместо CSS для поиска по тексту
+                        option_xpath_selectors = [
+                            f"//li[@role='option' and contains(text(), '{{document_language}}')]",
+                            f"//option[contains(text(), '{{document_language}}')]", 
+                            f"//*[@role='option' and contains(text(), '{{document_language}}')]",
+                            f"//li[contains(text(), '{{document_language}}')]"
                         ]
                         
                         language_option = None
-                        for selector in option_selectors:
+                        for xpath in option_xpath_selectors:
                             try:
-                                language_option = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, selector)))
+                                language_option = wait.until(EC.element_to_be_clickable((By.XPATH, xpath)))
                                 break
                             except TimeoutException:
                                 continue
@@ -638,24 +675,43 @@ class PromptGeneratorAgent:
             
             # 5. Нажать кнопку "Continue"
             try:
-                continue_selectors = [
-                    "button:contains('Continue')",
+                # Сначала пробуем CSS селекторы без :contains()
+                continue_css_selectors = [
                     "button[type='submit']",
                     "input[type='submit']",
                     "button.btn-primary",
-                    "button.btn",
-                    "button:contains('Submit')",
-                    "button:contains('Next')",
-                    "button:contains('Create')"
+                    "button.btn"
+                ]
+                
+                # Затем XPath селекторы с поиском по тексту
+                continue_xpath_selectors = [
+                    "//button[contains(text(), 'Continue')]",
+                    "//button[contains(text(), 'Submit')]",
+                    "//button[contains(text(), 'Next')]",
+                    "//button[contains(text(), 'Create')]",
+                    "//input[@value='Continue']",
+                    "//input[@value='Submit']",
+                    "//input[@value='Next']"
                 ]
                 
                 continue_button = None
-                for selector in continue_selectors:
+                
+                # Сначала пробуем CSS селекторы
+                for selector in continue_css_selectors:
                     try:
                         continue_button = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, selector)))
                         break
                     except TimeoutException:
                         continue
+                
+                # Если CSS не сработал, пробуем XPath
+                if not continue_button:
+                    for xpath in continue_xpath_selectors:
+                        try:
+                            continue_button = wait.until(EC.element_to_be_clickable((By.XPATH, xpath)))
+                            break
+                        except TimeoutException:
+                            continue
                 
                 if continue_button:
                     # Скроллим к кнопке и кликаем
@@ -1149,3 +1205,4 @@ class PromptGeneratorAgent:
             actions.append(action)
         
         return actions
+    

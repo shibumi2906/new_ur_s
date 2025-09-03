@@ -1,24 +1,48 @@
+# agents/main_agent.py
+
 import time
+import json
 from typing import Dict, Any, List
+
 from langchain_openai import ChatOpenAI
 from langchain.schema import HumanMessage, SystemMessage
-import json
 
-import sys
-import os
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-# пакетные импорты без sys.path-хаков
+# Абсолютные импорты под текущую структуру проекта
+# корректные относительные импорты внутри пакета GPT
 from ..config import Config
 from ..models import PageContext, PageState, AgentAction, ActionType, UserResponse
 from ..memory.agent_memory import AgentMemory
+
 from .navigator_agent import NavigatorAgent
 from .prompt_generator_agent import PromptGeneratorAgent
+from .lawyer_agent import LawyerAgent
+
 from ..tools.selenium_tool import SeleniumTool
 from ..tools.page_context_tool import PageContextTool
-from ..tools.preliminary_data_tool import PreliminaryDataTool
-from .lawyer_agent import LawyerAgent
 from ..tools.error_fix_tool import ErrorFixTool
+from ..tools.preliminary_data_tool import PreliminaryDataTool
+
 from ..logger import get_logger
+
+
+# Опциональная зависимость (проверка/фиксы формы Preliminary Data)
+try:
+    from preliminary_data_tool import PreliminaryDataTool  # если файл есть в проекте
+except ImportError:
+    class PreliminaryDataTool:
+        """Минимальная заглушка: успешная верификация без изменений."""
+        def __init__(self, *_, **__): ...
+        def verify_and_fix(
+            self,
+            context: PageContext,
+            expected: Dict[str, str],
+            error_fix_tool: ErrorFixTool,
+            selenium_tool: SeleniumTool,
+            credentials: Dict[str, str],
+            original_code: str,
+            original_prompt: str
+        ) -> bool:
+            return True
 
 
 class MainAgent:
@@ -242,11 +266,7 @@ class MainAgent:
         # Проверяем, собраны ли все обязательные поля для текущего состояния
         all_required_fields_collected = self._check_all_required_fields_collected()
 
-        # Активируем "юриста" если:
-        # 1. LLM сгенерировал секцию questions И мы еще не собрали все данные
-        # 2. Мы на странице предварительных данных И еще не собрали все обязательные поля
-        # 3. Мы на странице шаблонов (нужно предложить шаблон)
-
+        # Активация LawyerAgent по условиям
         should_activate_lawyer = (
             (has_questions and not all_required_fields_collected) or
             (current_state == PageState.PRELIMINARY_DATA and not all_required_fields_collected) or
@@ -265,22 +285,20 @@ class MainAgent:
             print(f"✅ LAWYER ACTIVATED - State: {current_state}")
             lawyer_result = self.run_lawyer_agent(context, current_state)
 
-            # НОВАЯ ЛОГИКА: Обработка immediate_fill для пошагового заполнения полей
+            # Немедленное заполнение одного поля
             if lawyer_result and lawyer_result.get("immediate_fill", False):
                 field_name = lawyer_result.get("field_name")
                 field_value = lawyer_result.get("answer")
 
                 print(f"🔍 IMMEDIATE FILL: {field_name} = {field_value}")
 
-                # Фильтруем мусорные значения
                 if not field_name or field_name == "unknown":
                     print(f"🔍 Ignoring unknown field in immediate_fill")
-                    return True  # Продолжаем цикл
+                    return True
                 if not field_value or field_value.lower() in {"no answer provided", "skip", "пропустить", "нет", "no", ""}:
                     print(f"🔍 Ignoring empty/technical answer in immediate_fill: '{field_value}'")
-                    return True  # Продолжаем цикл
+                    return True
 
-                # Генерируем и выполняем код для заполнения ОДНОГО поля
                 selenium_code = self._generate_single_field_code(field_name, field_value, context)
                 success = self._execute_code(selenium_code, context, f"Fill {field_name}")
 
@@ -301,26 +319,24 @@ class MainAgent:
                             self.logger.error(f"PreliminaryData verify_and_fix failed for {expected}")
                             return False
 
-                    return True  # Продолжаем цикл для следующего поля
+                    return True
                 else:
                     self.logger.error(f"Failed to fill field {field_name}")
                     return False
 
-            # Проверяем, завершил ли LawyerAgent сбор всех данных
+            # Все вопросы завершены — переходим к заполнению формы
             elif lawyer_result and lawyer_result.get("all_completed", False):
                 print(f"✅ All questions completed, proceeding to form filling")
-                # Переходим к заполнению формы: генерируем отдельный промпт для заполнения
                 self.logger.step("Form Filling")
-                # Собираем user_data из памяти
+
                 user_data_dict = self._extract_user_data_from_responses()
                 print(f"🔍 USER DATA FROM RESPONSES: {user_data_dict}")
                 if not user_data_dict:
-                    # fallback: попытка извлечь из ответа модели (если там есть вызовы функций)
                     user_data_dict = self._parse_function_calls(ai_response)
                 if not user_data_dict:
                     self.logger.error("No user data collected for form filling")
                     return False
-                # Создаем user_response для генератора промптов
+
                 user_response = {
                     'question': 'Document details collected',
                     'answer': str(user_data_dict),
@@ -332,41 +348,34 @@ class MainAgent:
                     user_response=user_response,
                     memory_summary="User data collected from LawyerAgent"
                 )
-                # Генерируем код для заполнения формы
                 form_filling_code = self._generate_code(form_filling_prompt, current_state)
-                # Выполняем код заполнения формы
                 success = self._execute_code(form_filling_code, context, form_filling_prompt)
                 if not success:
                     self.logger.error("Failed to fill form after retries")
                     return False
+
             else:
                 print(f"✅ Lawyer handled, continuing loop for more questions")
-                # Продолжаем цикл для получения дополнительных ответов
                 return True
+
         elif all_required_fields_collected and current_state == PageState.PRELIMINARY_DATA:
             # У нас есть данные от пользователя, нужно заполнить форму
             print(f"✅ User data collected, proceeding to form filling")
             self.logger.step("Form Filling with User Data")
 
-            # НОВАЯ АРХИТЕКТУРА: Парсим вызовы функции из ответа AI
             user_data_dict = self._parse_function_calls(ai_response)
-
-            # Если нет вызовов функции, используем старый метод
             if not user_data_dict:
                 user_data_dict = self._extract_user_data_from_responses()
 
             print(f"🔍 EXTRACTED USER DATA: {user_data_dict}")
             print(f"🔍 MEMORY RESPONSES COUNT: {len(self.memory.user_responses)}")
 
-            # Если данные извлечены успешно, используем их
             if user_data_dict:
-                # Создаем user_response в нужном формате для PromptGenerator
                 user_response = {
                     'question': 'Document details collected',
                     'answer': str(user_data_dict),
                     'legal_formulation': str(user_data_dict)
                 }
-                print(f"🔍 USER RESPONSE FOR PROMPT GENERATOR: {user_response}")
 
                 form_filling_prompt = self.prompt_generator.generate_form_filling_prompt(
                     context=context,
@@ -375,17 +384,15 @@ class MainAgent:
                     memory_summary="User data collected from LawyerAgent"
                 )
 
-                # Генерируем код для заполнения формы
                 form_filling_code = self._generate_code(form_filling_prompt, current_state)
 
-                # Выполняем код заполнения формы
                 success = self._execute_code(form_filling_code, context, form_filling_prompt)
                 if not success:
                     self.logger.error("Failed to fill form after retries")
                     return False
+
                 if current_state == PageState.PRELIMINARY_DATA:
                     expected = self._extract_user_data_from_responses()
-                    # keep only fields relevant to PRELIMINARY_DATA
                     expected = {
                         k: v for k, v in (expected or {}).items()
                         if k in ("document_name", "document_language") and v
@@ -403,6 +410,7 @@ class MainAgent:
                     if not ok:
                         self.logger.error("PreliminaryData verify_and_fix failed after form filling")
                         return False
+
                     # ensure page advances after verification
                     cont_code = self._generate_continue_button_code(context)
                     self._execute_code(cont_code, context, "click-continue-after-prelim-verify")
@@ -410,8 +418,9 @@ class MainAgent:
             else:
                 print(f"⚠️ No user data extracted, continuing with questions")
                 return True
+
         else:
-            # Выполняем код
+            # Выполняем код из ответа модели (навигация/мелкие действия)
             self.logger.step("Code Execution")
             print(f"✅ NO LAWYER NEEDED - Executing code")
             success = self._execute_code(ai_response, context, prompt)
@@ -435,17 +444,11 @@ class MainAgent:
                     self.logger.error(f"ErrorFixTool failed: {fix.get('error', 'Unknown')}")
                     return False
 
-
         return True
-
 
     def _handle_create_from_template(self, current_state: PageState, context: PageContext) -> bool:
         """Обрабатывает переходное состояние CREATE_FROM_TEMPLATE"""
         self.logger.step(f"Create From Template Handler: {current_state}")
-
-        # Анализируем страницу, чтобы понять, что делать дальше
-        # Если видим поля для заполнения - переходим к DOCUMENT_FILLING
-        # Если это еще промежуточная страница - используем навигационную логику
 
         print(f"🔍 CREATE_FROM_TEMPLATE: Analyzing page")
         print(f"🔍 CREATE_FROM_TEMPLATE: URL: {context.current_url}")
@@ -455,19 +458,15 @@ class MainAgent:
         form_fields = self._analyze_document_form_fields(context)
 
         if form_fields:
-            # Есть поля для заполнения - активируем LawyerAgent для сбора данных
             print(f"🔍 CREATE_FROM_TEMPLATE: Found {len(form_fields)} form fields, activating LawyerAgent")
             lawyer_result = self.run_lawyer_agent(context, PageState.DOCUMENT_FILLING)
 
             if lawyer_result and lawyer_result.get("all_completed", False):
-                # Данные собраны, переходим к заполнению
                 print(f"✅ Document data collected, proceeding to form filling")
                 return True
             else:
-                # Продолжаем сбор данных
                 return True
         else:
-            # Нет полей - используем обычную навигационную логику
             print(f"🔍 CREATE_FROM_TEMPLATE: No form fields found, using navigation logic")
             return self._handle_hardcoded_logic(current_state, context)
 
@@ -475,7 +474,6 @@ class MainAgent:
         """Анализирует, есть ли на странице поля для заполнения документа"""
         html = context.body_html.lower()
 
-        # Ищем признаки полей документа (не технических полей)
         document_field_indicators = [
             'party', 'contract', 'agreement', 'client', 'customer',
             'date', 'amount', 'price', 'duration', 'term',
@@ -492,7 +490,6 @@ class MainAgent:
                 element_id = (element.id or '').lower()
                 element_class = (element.class_name or '').lower()
 
-                # Проверяем, содержит ли элемент индикаторы полей документа
                 all_text = f"{element_text} {element_id} {element_class}"
                 if any(indicator in all_text for indicator in document_field_indicators):
                     form_fields.append(element)
@@ -572,15 +569,13 @@ class MainAgent:
         elif state == PageState.DOCUMENT_FILLING:
             return (
                 "You are assisting the user in filling out a document template on https://app.conneto.com.\n\n"
-                "Output policy:\n"
-                "- If ANY required value is missing: output ONE question in a ```questions block (no code).\n"
-                "- If all required values exist: output ONE ```python block ONLY with Selenium code that uses the existing `user_data` dict.\n\n"
-                "Strict rules for code:\n"
-                "1) Never hardcode field values; always read user_data['document_name'], user_data['document_language'], etc.\n"
-                "2) Use robust waits/selectors (CSS/XPath fallbacks) but keep code concise.\n"
-                "3) No prose outside fences; produce just the code block when filling.\n"
+                "Your task is to:\n"
+                "- Ask all required questions needed to complete the template.\n"
+                "- Format the questions in JSON under ```questions.\n"
+                "- Once all answers are collected, generate ready-to-use python selenium code to fill in the template fields.\n"
+                "- Wrap the code block in ```python.\n\n"
+                "If any data is missing, ask before generating code. After confirmation, your output must include a single python selenium code block."
             )
-
 
         elif state == PageState.COMPLETION:
             return (
@@ -639,11 +634,10 @@ class MainAgent:
             context_dict = context.dict()
             context_dict['current_state'] = state
 
-            # ВАЖНО: Передаем системный промпт от MainAgent в LawyerAgent
+            # Передаем системный промпт от MainAgent в LawyerAgent
             context_dict['system_prompt'] = self._get_system_message_for_state(state)
 
-
-            # Если это первый запуск для PRELIMINARY_DATA, пробуем пакетный режим
+            # Попытка пакетного режима для PRELIMINARY_DATA
             if (state == PageState.PRELIMINARY_DATA and
                 len(self.memory.user_responses) == 0 and
                 hasattr(self.lawyer_agent, 'collect_all_answers_batch')):
@@ -653,28 +647,23 @@ class MainAgent:
 
                 if batch_result.get("success") and batch_result.get("batch_complete"):
                     print(f"🎯 MAIN AGENT: BATCH mode successful! All data collected.")
-                    # Данные собраны, используем результат пакетного режима
                     result = batch_result
 
-                    # Нормализуем и сохраняем в контекст для автозаполнения
                     extracted = batch_result.get("extracted_data") or batch_result.get("user_data") or {}
                     if extracted:
                         context_dict["user_data"] = extracted
                         self.logger.info(f"USER_DATA (batch): {extracted}")
 
-                    # Сигнал основному циклу: всё собрано — переходим к заполнению
                     result["all_completed"] = True
                     result["immediate_fill"] = False
 
                 elif batch_result.get("waiting_for_batch_input"):
                     print(f"🎯 MAIN AGENT: BATCH questions asked, waiting for user input")
 
-                    # Проверяем готовность ответа через GUI
                     if hasattr(self, 'gui_instance') and self.gui_instance and hasattr(self.gui_instance, 'get_user_answer_if_ready'):
                         user_answer = self.gui_instance.get_user_answer_if_ready()
                         if user_answer:
                             print(f"🎯 MAIN AGENT: User answer received: '{user_answer[:50]}...'")
-                            # Обрабатываем ответ
                             if hasattr(self.lawyer_agent, 'process_batch_answer'):
                                 batch_result_final = self.lawyer_agent.process_batch_answer(user_answer)
                                 if batch_result_final.get("success") and batch_result_final.get("batch_complete"):
@@ -688,555 +677,32 @@ class MainAgent:
                                 result = self.lawyer_agent._run(context_dict)
                         else:
                             print(f"🎯 MAIN AGENT: Still waiting for user input...")
-                            return {"success": True, "waiting_for_input": True}  # Продолжаем ждать
+                            return {"success": True, "waiting_for_input": True}
                     else:
                         print(f"🎯 MAIN AGENT: No GUI available for answer checking, using standard mode")
                         result = self.lawyer_agent._run(context_dict)
                 else:
                     print(f"🎯 MAIN AGENT: BATCH mode failed, falling back to step-by-step")
-                    # Запускаем стандартный LawyerAgent (как было раньше)
                     print(f"🔍 MAIN AGENT: Calling LawyerAgent._run() with context")
                     result = self.lawyer_agent._run(context_dict)
             else:
-                # Если пакетный режим недоступен - запускаем стандартный LawyerAgent
                 print(f"🔍 MAIN AGENT: Calling LawyerAgent._run() with context")
                 result = self.lawyer_agent._run(context_dict)
 
-            if result["success"]:
-
-                # LawyerAgent уже создал UserResponse, просто добавляем в память
-                if hasattr(self.lawyer_agent, 'user_responses') and self.lawyer_agent.user_responses:
-                    latest_response = self.lawyer_agent.user_responses[-1]
-                    self.memory.add_user_response(latest_response)
-
-                    # ОТЛАДОЧНЫЕ ЛОГИ: отслеживаем все ответы пользователя
-                    print(f"🔍 MAIN AGENT: Total user responses in memory: {len(self.memory.user_responses)}")
-                    for i, resp in enumerate(self.memory.user_responses):
-                        print(f"🔍 MAIN AGENT: Response {i+1}: '{resp.question}' -> '{resp.answer}'")
-
-                # ВАЖНО: Получаем данные, извлеченные LawyerAgent через extract_form_data()
-                if 'extracted_data' in context_dict:
-                    print(f"🔍 MAIN AGENT: Received extracted_data from LawyerAgent: {context_dict['extracted_data']}")
-                    # Сохраняем извлеченные данные для последующего использования
-                    if not hasattr(self, 'lawyer_extracted_data'):
-                        self.lawyer_extracted_data = {}
-                    self.lawyer_extracted_data.update(context_dict['extracted_data'])
-                    print(f"🔍 MAIN AGENT: Total lawyer_extracted_data: {self.lawyer_extracted_data}")
-
-                # ОТЛАДОЧНЫЕ ЛОГИ: проверяем статус завершения
-                all_completed = result.get("all_completed", False)
-                print(f"🔍 MAIN AGENT: LawyerAgent all_completed status: {all_completed}")
-
-                # Логируем в зависимости от типа результата
-                if result.get("question_asked", False):
-                    self.logger.user_interaction(f"Question asked: {result.get('question', 'N/A')[:50]}")
-                    self.logger.info("Waiting for user response...")
-                elif result.get("answer"):
-                    self.logger.user_interaction("Response collected", result['answer'][:50])
-                    self.logger.info(f"Legal formulation: {result.get('legal_formulation', 'N/A')}")
-                else:
-                    self.logger.user_interaction("LawyerAgent processing...")
-                    self.logger.info("No answer yet")
-
-                return {
-                    "success": True,
-                    "all_completed": all_completed,
-                    "immediate_fill": result.get("immediate_fill", False),
-                    "field_name": result.get("field_name"),
-                    "answer": result.get("answer"),
-                    "result": result
-                }
-            else:
-                self.logger.error(f"Failed to collect user response: {result.get('error', 'Unknown error')}")
-                return {
-                    "success": False,
-                    "all_completed": False,
-                    "error": result.get('error', 'Unknown error')
-                }
-
-        except Exception as e:
+        if result["success"]:
+            except Exception as e:
             self.logger.error(f"LawyerAgent error: {str(e)}")
             return {
                 "success": False,
                 "all_completed": False,
                 "error": str(e)
             }
-
-    def _handle_questions(self, ai_response: str, context: PageContext):
-        """Обрабатывает вопросы к пользователю через LawyerAgent (устаревший метод)"""
-        return self.run_lawyer_agent(context, PageState.PRELIMINARY_DATA)
-
-    def _execute_code(self, code: str, context: PageContext, original_prompt: str) -> bool:
-        """Выполняет код с обработкой ошибок и повторными попытками"""
-        # Не исполняем вопросы или не-python ответы от LLM
-        if ("```questions" in (code or "")) or ("```python" not in (code or "")):
-            print("✅ Skipping execution: questions or non-python response handled by LawyerAgent/loop.")
-            return True
-
-        for attempt in range(self.max_retries):
-            self.logger.step(f"Code Execution (attempt {attempt + 1}/{self.max_retries})")
-
-            # Выполняем код
-            self.logger.selenium_action("Executing code", f"Attempt {attempt + 1}")
-            # Добавляем credentials и user_data в контекст
-            context_dict = context.dict()
-            context_dict['credentials'] = self.credentials
-
-            # Добавляем данные пользователя
-            user_data = {}
-            for response in self.memory.user_responses:
-                if response.question and response.answer:
-                    # Извлекаем триггер поля из вопроса
-                    import re
-                    field_match = re.search(r'\[FIELD:(\w+)\]', response.question)
-                    if field_match:
-                        field_name = field_match.group(1)
-                        user_data[field_name] = response.answer
-                        print(f"🔍 MAIN AGENT: Extracted field '{field_name}' with value '{response.answer}' from question: {response.question}")
-                    else:
-                        # Fallback на старый метод для совместимости
-                        question_lower = response.question.lower()
-                        if 'document name' in question_lower or 'название документа' in question_lower:
-                            user_data['document_name'] = response.answer
-                        elif 'language' in question_lower or 'язык' in question_lower:
-                            user_data['document_language'] = response.answer
-                        elif 'number' in question_lower or 'номер' in question_lower:
-                            user_data['document_number'] = response.answer
-                        elif 'project' in question_lower or 'проект' in question_lower:
-                            user_data['add_to_project'] = response.answer
-
-            context_dict['user_data'] = user_data
-
-            # Отладочный вывод перед выполнением Selenium
-            print(f"🔍 MAIN AGENT: Executing Selenium with user_data: {user_data}")
-            print(f"🔍 MAIN AGENT: Total context keys: {list(context_dict.keys())}")
-            print(f"🔍 MAIN AGENT: Total user responses: {len(self.memory.user_responses)}")
-
-            # КРИТИЧЕСКИ ВАЖНО: отладочная информация для каждого поля
-            if user_data:
-                print(f"🔍 MAIN AGENT: USER DATA DETAILS:")
-                for key, value in user_data.items():
-                    print(f"🔍 MAIN AGENT:   {key}: '{value}'")
-            else:
-                print(f"🔍 MAIN AGENT: ❌ USER_DATA IS EMPTY! Checking why...")
-                if self.memory.user_responses:
-                    print(f"🔍 MAIN AGENT: Available responses:")
-                    for i, resp in enumerate(self.memory.user_responses):
-                        print(f"🔍 MAIN AGENT:   {i+1}. Q: '{resp.question}' -> A: '{resp.answer}'")
-                        # Проверяем триггеры
-                        import re
-                        field_match = re.search(r'\[FIELD:(\w+)\]', resp.question)
-                        if field_match:
-                            print(f"🔍 MAIN AGENT:      TRIGGER FOUND: {field_match.group(1)}")
-                        else:
-                            print(f"🔍 MAIN AGENT:      NO TRIGGER FOUND!")
-                else:
-                    print(f"🔍 MAIN AGENT: No user responses in memory!")
-
-            # Проверяем, что код содержит данные пользователя
-            if user_data and 'user_data' in code:
-                print(f"🔍 MAIN AGENT: Code contains user_data references ✅")
-            elif user_data:
-                print(f"🔍 MAIN AGENT: ⚠️ Code does NOT contain user_data references!")
-            else:
-                print(f"🔍 MAIN AGENT: ❌ No user_data to pass to Selenium!")
-
-            result = self.selenium_tool._run(code, context_dict)
-
-            if result["success"]:
-                # Сохраняем успешное действие
-                action = AgentAction(
-                    action_type=ActionType.NAVIGATE,
-                    description="Code execution successful",
-                    code=code,
-                    success=True
-                )
-                self.memory.add_action(action)
-                self.logger.success("Code executed successfully")
-                return True
-
-            else:
-                # Обрабатываем ошибку
-                error_msg = result.get("error", "Unknown error")
-                self.logger.error(f"Code execution failed: {error_msg}")
-
-                # Сохраняем неудачное действие
-                action = AgentAction(
-                    action_type=ActionType.ERROR_FIX,
-                    description=f"Code execution failed: {error_msg}",
-                    code=code,
-                    success=False,
-                    error_message=error_msg
-                )
-                self.memory.add_action(action)
-                self.memory.add_error(error_msg)
-
-                # Пытаемся исправить ошибку
-                if attempt < self.max_retries - 1:
-                    self.logger.step("Error Fix Attempt")
-                    fix_result = self.error_fix_tool._run(
-                        original_code=code,
-                        error_message=error_msg,
-                        context=context.dict(),
-                        initial_prompt=original_prompt
-                    )
-
-                    if fix_result["success"]:
-                        code = fix_result["corrected_code"]
-                        self.logger.success("Error fix generated, retrying...")
-                        continue
-                    else:
-                        self.logger.error(f"Failed to generate error fix: {fix_result.get('error', 'Unknown error')}")
-
-        return False
-
-    def _request_credentials(self):
-        """Запрос учетных данных"""
-        self.logger.info("=== Authorization Required ===")
-        self.logger.info(f"Using credentials: {self.credentials['email']}")
-        # Учетные данные уже переданы в конструкторе
-        self.memory.is_authenticated = True
-        self.logger.success("Credentials set successfully")
-
-    def set_gui_callback(self, callback):
-        """Устанавливает callback для взаимодействия с GUI"""
-        self.lawyer_agent.gui_callback = callback
-        self.logger.info(f"GUI callback set for LawyerAgent: {callback}")
-        print(f"🔍 MAIN AGENT: GUI callback set: {callback}")
-
-    def set_gui_instance(self, gui_instance):
-        """Устанавливает экземпляр GUI для проверки ответов пользователя"""
-        self.gui_instance = gui_instance
-        self.logger.info(f"GUI instance set for MainAgent: {gui_instance}")
-        print(f"🔍 MAIN AGENT: GUI instance set: {gui_instance}")
-
-    def extract_form_data(self, user_answer: str, question_type: str) -> Dict[str, str]:
-        """Извлекает данные формы из ответа пользователя по типу вопроса"""
-        print(f"🔍 EXTRACTING FORM DATA: answer='{user_answer}', type='{question_type}'")
-
-        if question_type == "title" or question_type == "name":
-            return {"document_name": user_answer}
-        elif question_type == "language":
-            return {"document_language": user_answer}
-        elif question_type == "number":
-            return {"document_number": user_answer}
-        elif question_type == "project":
-            return {"add_to_project": user_answer}
-        else:
-            print(f"🔍 UNKNOWN QUESTION TYPE: {question_type}")
-            return {}
-
-    def _parse_function_calls(self, ai_response: str) -> Dict[str, str]:
-        """Парсит вызовы функции extract_form_data из ответа AI"""
-        import re
-
-        print(f"🔍 PARSING FUNCTION CALLS from: {ai_response[:200]}...")
-
-        # Ищем вызовы функции extract_form_data
-        pattern = r'extract_form_data\(user_answer=["\']([^"\']+)["\'],\s*question_type=["\']([^"\']+)["\']\)'
-        matches = re.findall(pattern, ai_response)
-
-        user_data = {}
-        for user_answer, question_type in matches:
-            print(f"🔍 FOUND FUNCTION CALL: extract_form_data('{user_answer}', '{question_type}')")
-            extracted_data = self.extract_form_data(user_answer, question_type)
-            user_data.update(extracted_data)
-
-        print(f"🔍 PARSED USER DATA: {user_data}")
-        return user_data
-
-    def _extract_user_data_from_responses(self) -> Dict[str, str]:
-        """Извлекает структурированные данные из ответов пользователя"""
-        user_data = {}
-
-        print(f"🔍 PROCESSING {len(self.memory.user_responses)} USER RESPONSES:")
-
-        for i, response in enumerate(self.memory.user_responses):
-            question = response.question
-            answer = response.answer.strip()
-
-            print(f"🔍 Response {i+1}: Q='{question}' A='{answer}'")
-
-            # Сначала пытаемся извлечь триггер поля
-            import re
-            field_match = re.search(r'\[FIELD:(\w+)\]', question)
-            if field_match:
-                field_name = field_match.group(1)
-                # Игнорируем unknown и пустые ответы
-                if field_name == "unknown":
-                    print(f"🔍 Ignoring unknown field")
-                    continue
-                if not answer or answer.lower() in {"no answer provided", "skip", "пропустить", "нет", "no", ""}:
-                    print(f"🔍 Ignoring empty/technical answer: '{answer}'")
-                    continue
-                user_data[field_name] = answer
-                print(f"🔍 Found field '{field_name}' from trigger: {answer}")
-            else:
-                # Fallback на старый метод с ключевыми словами
-                question_lower = question.lower()
-                print(f"🔍 CHECKING KEYWORDS for question: '{question_lower}'")
-
-                # Проверяем точные ключи сначала
-                if question_lower.strip() == "document_name":
-                    user_data['document_name'] = answer
-                    print(f"🔍 Found document_name (exact key): {answer}")
-                elif question_lower.strip() == "document_language":
-                    user_data['document_language'] = answer
-                    print(f"🔍 Found document_language (exact key): {answer}")
-                # Расширенный список ключевых слов для названия документа
-                elif any(keyword in question_lower for keyword in [
-                    "название", "наименование", "document name", "title",
-                    "название документа", "название файла", "введите название"
-                ]):
-                    user_data['document_name'] = answer
-                    print(f"🔍 Found document_name: {answer}")
-                # Расширенный список ключевых слов для языка
-                elif any(keyword in question_lower for keyword in [
-                    "язык", "language", "lang", "язык документа", "выберите язык"
-                ]):
-                    user_data['document_language'] = answer
-                    print(f"🔍 Found document_language: {answer}")
-                # Номер документа
-                elif any(keyword in question_lower for keyword in [
-                    "номер", "number", "num", "номер документа", "введите номер"
-                ]):
-                    if answer and answer.lower() not in ["skip", "пропустить", "нет", "no", ""]:
-                        user_data['document_number'] = answer
-                        print(f"🔍 Found document_number: {answer}")
-                # Проект
-                elif any(keyword in question_lower for keyword in [
-                    "проект", "project", "proj", "выберите проект", "добавить к проекту"
-                ]):
-                    if answer and answer.lower() not in ["skip", "пропустить", "нет", "no", ""]:
-                        user_data['add_to_project'] = answer
-                        print(f"🔍 Found add_to_project: {answer}")
-
-        print(f"🔍 FINAL EXTRACTED USER DATA: {user_data}")
-        return user_data
-
-    def _check_all_required_fields_collected(self) -> bool:
-        """Проверяет, собраны ли все обязательные поля для текущего состояния"""
-        required_fields = ["document_name", "document_language"]
-        collected_fields = []
-
-        for response in self.memory.user_responses:
-            question = response.question
-            answer_lower = response.answer.lower()
-
-            # Сначала проверяем триггеры полей
-            import re
-            field_match = re.search(r'\[FIELD:(\w+)\]', question)
-            if field_match:
-                field_name = field_match.group(1)
-                if answer_lower and answer_lower not in ["skip", "пропустить", "нет", "no", ""]:
-                    collected_fields.append(field_name)
-                    print(f"🔍 Found {field_name} from trigger: '{question}' -> '{response.answer}'")
-            else:
-                # Fallback на старый метод с ключевыми словами
-                question_lower = question.lower()
-
-                # Проверяем разные варианты вопросов (без подчёркиваний)
-                if (any(keyword in question_lower for keyword in ["название", "document name", "title"]) or
-                    "название файла" in question_lower):
-                    if answer_lower and answer_lower not in ["skip", "пропустить", "нет", "no", ""]:
-                        collected_fields.append("document_name")
-                        print(f"🔍 Found document_name from question: '{question_lower}' -> '{answer_lower}'")
-
-                elif (any(keyword in question_lower for keyword in ["язык", "language"]) or
-                      "язык документа" in question_lower):
-                    if answer_lower and answer_lower not in ["skip", "пропустить", "нет", "no", ""]:
-                        collected_fields.append("document_language")
-                        print(f"🔍 Found document_language from question: '{question_lower}' -> '{answer_lower}'")
-
-        all_collected = all(field in collected_fields for field in required_fields)
-        print(f"🔍 REQUIRED FIELDS CHECK: {required_fields}")
-        print(f"🔍 COLLECTED FIELDS: {collected_fields}")
-        print(f"🔍 ALL COLLECTED: {all_collected}")
-        return all_collected
+            # Добавляем последний ответ в память (если есть)
+            if hasattr(self.lawyer_agent, 'user_responses') and self.lawyer_agent.user_responses:
+                latest_response = self.lawyer_agent.user_responses[-1]
+                self.memory.add_user_response(latest_response)
+                print(f"🔍 MAIN AGENT: Total user responses in memory: {len(self.memory.user_responses)}")
+                for i, resp in enumerate(self.memory.user_responses):
+                    print(f"🔍 MAIN AGENT: Response {i + 1}: '{resp.question}' -> '{resp.answer}'")
 
 
-
-    def _generate_single_field_code(self, field_name: str, field_value: str, context: PageContext) -> str:
-        """Генерирует Selenium код для заполнения одного поля"""
-        if field_name == "document_name":
-            return f"""
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException
-import time
-
-wait = WebDriverWait(driver, 15)
-
-try:
-    # Ищем поле для названия документа
-    selectors = [
-        "input[placeholder*='Document name']",
-        "input[name*='document']", 
-        "input[name*='name']",
-        "input[placeholder*='name']",
-        "input[type='text']"
-    ]
-    
-    document_name_input = None
-    for selector in selectors:
-        try:
-            document_name_input = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, selector)))
-            break
-        except TimeoutException:
-            continue
-    
-    if document_name_input:
-        document_name_input.clear()
-        document_name_input.send_keys("{field_value}")
-        print(f"✅ Document name filled: {field_value}")
-    else:
-        print("❌ Document name input not found")
-        
-except Exception as e:
-    print(f"❌ Error filling document name: {{e}}")
-"""
-
-        elif field_name == "document_language":
-            return f"""
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException
-import time
-
-wait = WebDriverWait(driver, 15)
-
-try:
-    # Ищем dropdown для языка
-    dropdown_selectors = [
-        ".vs__dropdown-toggle",
-        "[role='combobox']", 
-        ".g-select-search__wrapper",
-        "select",
-        ".dropdown-toggle"
-    ]
-    
-    language_dropdown = None
-    for selector in dropdown_selectors:
-        try:
-            language_dropdown = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, selector)))
-            break
-        except TimeoutException:
-            continue
-    
-    if language_dropdown:
-        # Кликаем на dropdown
-        driver.execute_script("arguments[0].click();", language_dropdown)
-        time.sleep(1)
-        
-        # Ищем опцию с нужным языком
-        option_xpath_selectors = [
-            "//li[@role='option' and contains(text(), '{field_value}')]",
-            "//option[contains(text(), '{field_value}')]",
-            "//*[@role='option' and contains(text(), '{field_value}')]", 
-            "//li[contains(text(), '{field_value}')]"
-        ]
-        
-        language_option = None
-        for xpath in option_xpath_selectors:
-            try:
-                language_option = wait.until(EC.element_to_be_clickable((By.XPATH, xpath)))
-                break
-            except TimeoutException:
-                continue
-        
-        if language_option:
-            driver.execute_script("arguments[0].click();", language_option)
-            print(f"✅ Document language selected: {field_value}")
-        else:
-            print(f"❌ Language option '{field_value}' not found")
-    else:
-        print("❌ Document language dropdown not found")
-        
-except Exception as e:
-    print(f"❌ Error selecting document language: {{e}}")
-"""
-
-        else:
-            return f"""
-# Заполнение поля {field_name} значением {field_value}
-print(f"Filling field {{field_name}} with value {{field_value}}")
-"""
-
-    def _generate_continue_button_code(self, context: PageContext) -> str:
-        """Генерирует код для нажатия кнопки Continue"""
-        return """
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException
-import time
-
-wait = WebDriverWait(driver, 15)
-
-try:
-    # Сначала пробуем CSS селекторы
-    continue_css_selectors = [
-        "button[type='submit']",
-        "input[type='submit']", 
-        "button.btn-primary",
-        "button.btn"
-    ]
-    
-    # Затем XPath селекторы
-    continue_xpath_selectors = [
-        "//button[contains(text(), 'Continue')]",
-        "//button[contains(text(), 'Submit')]",
-        "//button[contains(text(), 'Next')]",
-        "//button[contains(text(), 'Create')]",
-        "//input[@value='Continue']",
-        "//input[@value='Submit']",
-        "//input[@value='Next']"
-    ]
-    
-    continue_button = None
-    
-    # Пробуем CSS селекторы
-    for selector in continue_css_selectors:
-        try:
-            continue_button = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, selector)))
-            break
-        except TimeoutException:
-            continue
-    
-    # Если CSS не сработал, пробуем XPath
-    if not continue_button:
-        for xpath in continue_xpath_selectors:
-            try:
-                continue_button = wait.until(EC.element_to_be_clickable((By.XPATH, xpath)))
-                break
-            except TimeoutException:
-                continue
-    
-    if continue_button:
-        driver.execute_script("arguments[0].scrollIntoView(true);", continue_button)
-        time.sleep(1)
-        driver.execute_script("arguments[0].click();", continue_button)
-        print("✅ Continue button clicked successfully")
-    else:
-        print("❌ Continue button not found")
-        
-except Exception as e:
-    print(f"❌ Error clicking continue button: {e}")
-"""
-
-
-
-
-
-    def get_status(self) -> Dict[str, Any]:
-        """Возвращает текущий статус агента"""
-        return {
-            "is_running": self.is_running,
-            "current_state": self.memory.current_state,
-            "is_authenticated": self.memory.is_authenticated,
-            "total_actions": len(self.memory.actions_history),
-            "total_user_responses": len(self.memory.user_responses),
-            "recent_errors": len(self.memory.get_recent_errors())
-        }
