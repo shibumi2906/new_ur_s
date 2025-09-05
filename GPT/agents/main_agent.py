@@ -286,6 +286,18 @@ class MainAgent:
 
                 if success:
                     print(f"✅ Field {field_name} filled successfully")
+                    # ⬇️ sync memory & cache
+                    if not hasattr(self, 'lawyer_extracted_data'):
+                        self.lawyer_extracted_data = {}
+                    self.lawyer_extracted_data[field_name] = str(field_value).strip()
+                    self.memory.add_user_response(
+                        UserResponse(
+                            question=f"{field_name} [FIELD:{field_name}]",
+                            answer=str(field_value).strip(),
+                            legal_formulation=str(field_value).strip(),
+                            timestamp=time.time()
+                        )
+                    )
                     if current_state == PageState.PRELIMINARY_DATA:
                         expected = {field_name: field_value}
                         ok = self.prelim_tool.verify_and_fix(
@@ -571,15 +583,38 @@ class MainAgent:
 
         elif state == PageState.DOCUMENT_FILLING:
             return (
-                "You are assisting the user in filling out a document template on https://app.conneto.com.\n\n"
-                "Output policy:\n"
-                "- If ANY required value is missing: output ONE question in a ```questions block (no code).\n"
-                "- If all required values exist: output ONE ```python block ONLY with Selenium code that uses the existing `user_data` dict.\n\n"
-                "Strict rules for code:\n"
-                "1) Never hardcode field values; always read user_data['document_name'], user_data['document_language'], etc.\n"
-                "2) Use robust waits/selectors (CSS/XPath fallbacks) but keep code concise.\n"
-                "3) No prose outside fences; produce just the code block when filling.\n"
+                "You are an automation copilot. Output ONLY executable Python code for Selenium 4 (no markdown, no backticks, no comments). "
+                "Environment: you already have variables `driver` (selenium.webdriver.Chrome) and `user_data` (dict with keys: "
+                "`document_name`, `document_language`, `document_number`, `project`). "
+                "Task: fill the preliminary form on https://app.conneto.com using values from `user_data` if the matching inputs exist, "
+                "then click the form's Submit/Next/Continue button and wait for the next page to load.\n"
+                "\n"
+                "Hard requirements:\n"
+                "- Use Selenium 4 WebDriverWait with expected_conditions (timeout 15s). "
+                "- Prefer CSS selectors; try multiple sensible selectors in order for each field. "
+                "- Do not print or return anything; just run the actions. "
+                "- For clicking, use element_to_be_clickable and `driver.execute_script('arguments[0].click();', btn)` as fallback.\n"
+                "\n"
+                "Inputs to try (in order):\n"
+                "- document name:  input[name='name'], input#documentName, input[placeholder*='Document name']\n"
+                "- language:       select[name='language'], div[role='combobox'][aria-label*='Language']\n"
+                "- number:         input[name='number'],  input#documentNumber\n"
+                "- project:        input[name='project'], div[role='combobox'][aria-label*='Project']\n"
+                "\n"
+                "Submit/Next buttons to try (XPaths, in order):\n"
+                "- //button[@type='submit']\n"
+                "- //button[contains(@class,'primary')]\n"
+                "- //button[contains(.,'Next') or contains(.,'Create') or contains(.,'Continue')]\n"
+                "- //*[@aria-label and (contains(@aria-label,'Next') or contains(@aria-label,'Continue'))]\n"
+                "\n"
+                "After clicking the button, wait for ANY of:\n"
+                "- URL change from the current URL; or\n"
+                "- Presence of a next-page element like: .editor-container, .document-editor, [data-page='editor']\n"
+                "\n"
+                "If no submit/next button is found/clickable after trying all selectors, raise: Exception('PRELIMINARY_DATA_SUBMIT_NOT_FOUND')."
             )
+
+
 
 
         elif state == PageState.COMPLETION:
