@@ -125,7 +125,7 @@ class MainAgent:
                     return True
 
                 # 4. Выбираем режим работы: жёсткая логика или AI-управление
-                if current_state.value in ['LOGIN', 'PAGE_1', 'PAGE_2', 'OPTIONS', 'DOCUMENTS_PAGE']:
+                if current_state in {PageState.LOGIN, PageState.PAGE_1, PageState.DOCUMENTS_PAGE}:
                     # ЖЁСТКАЯ ЛОГИКА для простых этапов
                     self.logger.info("Using HARDCODED LOGIC for simple navigation")
                     success = self._handle_hardcoded_logic(current_state, context)
@@ -750,8 +750,12 @@ class MainAgent:
                         print(f"🔍 MAIN AGENT: Response {i+1}: '{resp.question}' -> '{resp.answer}'")
 
                 # ВАЖНО: Получаем данные, извлеченные LawyerAgent через extract_form_data()
-                if 'extracted_data' in context_dict:
-                    print(f"🔍 MAIN AGENT: Received extracted_data from LawyerAgent: {context_dict['extracted_data']}")
+                    extracted = result.get("extracted_data") or context_dict.get("extracted_data")
+                    if extracted:
+                        if not hasattr(self, 'lawyer_extracted_data'):
+                            self.lawyer_extracted_data = {}
+                        self.lawyer_extracted_data.update(extracted)
+
                     # Сохраняем извлеченные данные для последующего использования
                     if not hasattr(self, 'lawyer_extracted_data'):
                         self.lawyer_extracted_data = {}
@@ -804,8 +808,9 @@ class MainAgent:
     def _execute_code(self, code: str, context: PageContext, original_prompt: str) -> bool:
         """Выполняет код с обработкой ошибок и повторными попытками"""
         # Не исполняем вопросы или не-python ответы от LLM
-        if ("```questions" in (code or "")) or ("```python" not in (code or "")):
-            print("✅ Skipping execution: questions or non-python response handled by LawyerAgent/loop.")
+        clean = code or ""
+        if "```questions" in clean:
+            print("✅ Skipping execution: questions handled by LawyerAgent/loop.")
             return True
 
         for attempt in range(self.max_retries):
