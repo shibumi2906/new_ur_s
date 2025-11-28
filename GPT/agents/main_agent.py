@@ -6,6 +6,7 @@ import json
 
 import sys
 import os
+
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # пакетные импорты без sys.path-хаков
 from ..config import Config
@@ -55,7 +56,8 @@ class MainAgent:
         self.page_context_tool = PageContextTool()
         self.prelim_tool = PreliminaryDataTool(driver, logger=self.logger)
 
-        self.lawyer_agent = LawyerAgent(driver=driver, prompt_generator=self.prompt_generator)  # GUI callback будет установлен позже
+        self.lawyer_agent = LawyerAgent(driver=driver,
+                                        prompt_generator=self.prompt_generator)  # GUI callback будет установлен позже
         self.error_fix_tool = ErrorFixTool()
 
         # Состояние
@@ -134,7 +136,7 @@ class MainAgent:
                     self.logger.info("CREATE_FROM_TEMPLATE state - analyzing page for next step")
                     success = self._handle_create_from_template(current_state, context)
                 else:
-                    # AI-УПРАВЛЕНИЕ для сложных этапов (PRELIMINARY_DATA и далее)
+                    # AI-УПРАВЛЕНИЕ для сложных этапов (PRELIMINARY_DATA, TEMPLATE_SELECTION и далее)
                     self.logger.info("Using AI-DRIVEN LOGIC for complex interactions")
                     success = self._handle_ai_logic(current_state, context)
 
@@ -157,7 +159,8 @@ class MainAgent:
     def _handle_initial_navigation(self, current_url: str):
         """Жёсткая логика начальной навигации"""
         # Если попали на /projects или другие страницы после входа, перенаправляем на /home
-        if any(path in current_url for path in ["/projects", "/dashboard"]) and "/login" not in current_url and "/contracts" not in current_url:
+        if any(path in current_url for path in
+               ["/projects", "/dashboard"]) and "/login" not in current_url and "/contracts" not in current_url:
             self.logger.info(f"Redirecting from {current_url} to /home")
             self.driver.get("https://app.conneto.com/home")
             time.sleep(3)
@@ -166,19 +169,13 @@ class MainAgent:
 
         # Если попали на страницу предварительных данных без правильной последовательности
         if "/create-contract/details" in current_url and not self.memory.user_responses:
-            self.logger.info(f"Redirecting from {current_url} to /home - wrong sequence")
-            self.driver.get("https://app.conneto.com/home")
-            time.sleep(3)
-            current_url = self.driver.current_url
-            self.logger.info(f"Redirected to: {current_url}")
+            self.logger.info(f"Detected PRELIMINARY_DATA page without user responses - activating LawyerAgent")
+            # НЕ делаем редирект - остаёмся на странице для активации LawyerAgent
 
         # Если попали на страницу шаблонов без получения данных от пользователя
         if "/create-contract/templates" in current_url and not self.memory.user_responses:
-            self.logger.info(f"Redirecting from {current_url} to /home - no user data collected")
-            self.driver.get("https://app.conneto.com/home")
-            time.sleep(3)
-            current_url = self.driver.current_url
-            self.logger.info(f"Redirected to: {current_url}")
+            self.logger.info(f"Detected TEMPLATE_SELECTION page without user responses - activating LawyerAgent")
+            # НЕ делаем редирект - остаёмся на странице для активации LawyerAgent
 
         # Если попали на страницу авторизации, сначала авторизуемся
         if "/login" in current_url or "/signin" in current_url or "login" in current_url.lower():
@@ -219,6 +216,45 @@ class MainAgent:
         """НОВАЯ ПРОСТАЯ ЛОГИКА: пошаговое заполнение формы"""
         self.logger.step(f"AI Logic: {current_state}")
 
+        # РАННЯЯ ОТСЕЧКА: для PRELIMINARY_DATA сначала собираем обязательные поля
+        if current_state == PageState.PRELIMINARY_DATA:
+            all_required_fields_collected = self._check_all_required_fields_collected()
+            if not all_required_fields_collected:
+                self.logger.step("Lawyer Agent Activation Required (early)")
+                print(f"✅ EARLY LAWYER ACTIVATION - State: {current_state}")
+                lawyer_result = self.run_lawyer_agent(context, current_state)
+
+                # Обрабатываем результат LawyerAgent
+                if lawyer_result and lawyer_result.get("immediate_fill", False):
+                    field_name = lawyer_result.get("field_name")
+                    field_value = lawyer_result.get("answer")
+
+                    if field_name and field_name != "unknown" and field_value and field_value.lower() not in {
+                        "no answer provided", "skip", "пропустить", "нет", "no", ""}:
+                        selenium_code = self._generate_single_field_code(field_name, field_value, context)
+                        success = self._execute_code(selenium_code, context, f"Early fill: {field_name}")
+                        if success:
+                            print(f"✅ Early field {field_name} filled successfully")
+                            # Сохраняем в память
+                            if not hasattr(self, 'lawyer_extracted_data'):
+                                self.lawyer_extracted_data = {}
+                            self.lawyer_extracted_data[field_name] = str(field_value).strip()
+                            self.memory.add_user_response(
+                                UserResponse(
+                                    question=f"{field_name} [FIELD:{field_name}]",
+                                    answer=str(field_value).strip(),
+                                    legal_formulation=str(field_value).strip(),
+                                    timestamp=time.time()
+                                )
+                            )
+                        return True  # Продолжаем цикл
+
+                # Если все данные собраны, продолжаем обычную логику
+                if lawyer_result and lawyer_result.get("all_completed", False):
+                    print(f"✅ All required fields collected, proceeding to form filling")
+                else:
+                    return True  # Продолжаем сбор данных
+
         # Генерируем промпт
         has_user_data = len(self.memory.user_responses) > 0
         user_responses = [{"question": resp.question, "answer": resp.answer} for resp in self.memory.user_responses]
@@ -248,9 +284,9 @@ class MainAgent:
         # 3. Мы на странице шаблонов (нужно предложить шаблон)
 
         should_activate_lawyer = (
-            (has_questions and not all_required_fields_collected) or
-            (current_state == PageState.PRELIMINARY_DATA and not all_required_fields_collected) or
-            current_state == PageState.TEMPLATE_SELECTION
+                (has_questions and not all_required_fields_collected) or
+                (current_state == PageState.PRELIMINARY_DATA and not all_required_fields_collected) or
+                current_state == PageState.TEMPLATE_SELECTION
         )
 
         print(f"🔍 DEBUG LAWYER ACTIVATION:")
@@ -276,7 +312,8 @@ class MainAgent:
                 if not field_name or field_name == "unknown":
                     print(f"🔍 Ignoring unknown field in immediate_fill")
                     return True  # Продолжаем цикл
-                if not field_value or field_value.lower() in {"no answer provided", "skip", "пропустить", "нет", "no", ""}:
+                if not field_value or field_value.lower() in {"no answer provided", "skip", "пропустить", "нет", "no",
+                                                              ""}:
                     print(f"🔍 Ignoring empty/technical answer in immediate_fill: '{field_value}'")
                     return True  # Продолжаем цикл
 
@@ -429,7 +466,8 @@ class MainAgent:
             success = self._execute_code(ai_response, context, prompt)
             if not success:
                 self.logger.error("Failed to execute code — invoking ErrorFixTool (final attempt)")
-                recent_err = (self.memory.get_recent_errors()[-1] if self.memory.get_recent_errors() else "Unknown error")
+                recent_err = (
+                    self.memory.get_recent_errors()[-1] if self.memory.get_recent_errors() else "Unknown error")
                 fix = self.error_fix_tool._run(
                     original_code=ai_response,
                     error_message=recent_err,
@@ -447,9 +485,7 @@ class MainAgent:
                     self.logger.error(f"ErrorFixTool failed: {fix.get('error', 'Unknown')}")
                     return False
 
-
         return True
-
 
     def _handle_create_from_template(self, current_state: PageState, context: PageContext) -> bool:
         """Обрабатывает переходное состояние CREATE_FROM_TEMPLATE"""
@@ -532,7 +568,7 @@ class MainAgent:
 
         if state == PageState.PRELIMINARY_DATA:
             return (
-                "You are a legal assistant helping the user prepare a new document on https://app.conneto.com.\n\n"
+                "You are a legal assistant helping the user prepare a new document on [https://app.conneto.com](https://app.conneto.com).\n\n"
                 "Your task is to:\n"
                 "- Ask the user ONE question at a time, starting with the most important required fields first.\n"
                 "- Required fields (in order of priority): document name, document language.\n"
@@ -562,64 +598,71 @@ class MainAgent:
                 "- User: \"English\" → extract_form_data(\"English\", \"language\")\n"
                 "- User: \"123\" → extract_form_data(\"123\", \"number\")\n\n"
                 "⚠️ CRITICAL: You MUST call extract_form_data() after EVERY user response. This is NOT optional!"
+                "Scope ALL element searches to the main content FORM, NEVER header or nav. "
+                "First locate a container: container = driver.find_element(By.CSS_SELECTOR, 'main, div[role=\"main\"], form, div.content, div.page'); "
+                "Then ONLY search INSIDE it (use container.find_element / container.find_elements). "
+                "Avoid header/nav by excluding elements with ancestors header or nav in XPath. "
+                "When locating inputs, follow this order INSIDE container: "
+                "1) By label → //label[normalize-space()='Document name']/following::*[self::input or self::textarea][1][not(ancestor::header) and not(ancestor::nav)] "
+                "2) By attributes → input[placeholder*='Document name' i], input[name*='document_name' i], input[id*='document_name' i] (inside container only). "
+                "Never type into global search, header or nav elements. "
+                "Use provided variables: user_data['document_name'], user_data['document_language']. "
+                "After typing, assert the value belongs to the form field (not header): "
+                "  assert field.get_attribute('value') == user_data['document_name'] "
+                "  try: hs = driver.find_element(By.CSS_SELECTOR, 'header input, nav input'); "
+                "       assert hs.get_attribute('value') != user_data['document_name'] "
+                "  except Exception: pass "
+                "Wrap the answer in ```python fences (no comments). "
+
             )
 
+        # === ИСПРАВЛЕНО: Добавлена логика анализа шаблонов ===
         elif state == PageState.TEMPLATE_SELECTION:
             return (
-                "You are assisting the user in selecting the appropriate document template on https://app.conneto.com.\n\n"
-                "Your task is to:\n"
-                "- Analyze the list of available templates (provided in context).\n"
-                "- Ask the user which type of document they intend to create.\n"
-                "- Based on their answer, suggest the most relevant template(s).\n"
-                "- Format your suggestions in JSON under ```template_suggestions.\n\n"
-                "Example format:\n"
-                "```template_suggestions\n"
+                "Вы — юрист-помощник, который помогает пользователю выбрать шаблон документа на странице [https://app.conneto.com/create-contract/templates](https://app.conneto.com/create-contract/templates).\n"
+                "Страница содержит список доступных шаблонов, например: 'NDA official version', 'NDA-7', 'Contract of Service'.\n\n"
+                "ВАША ЗАДАЧА:\n"
+                "1. **КРИТИЧЕСКИ ВАЖНО:** Проанализируйте предоставленный контекст страницы (`elements` и `body_html`) для поиска названий всех доступных шаблонов.\n"
+                "2. Сформируйте вопрос пользователю, явно перечислив все найденные вами варианты шаблонов.\n"
+                "3. Вопрос должен быть в формате JSON:\n"
+                "```questions\n"
                 "[\n"
-                "  {\"template_name\": \"Contract of Rent\", \"reason\": \"Matches user's intent to rent equipment\"}\n"
+                "  {\"question\": \"Какой из следующих шаблонов вы хотите использовать? (Доступные варианты: [ПЕРЕЧИСЛИТЕ НАЙДЕННЫЕ ШАБЛОНЫ ИЗ КОНТЕКСТА])\"}\n"
                 "]\n"
-                "```\n\n"
-                "Do not generate selenium code yet. Focus only on guiding the user through template selection."
+                "```\n"
+                "4. ОБЯЗАТЕЛЬНО: После получения ответа от пользователя (например, 'NDA official version'), вы ДОЛЖНЫ вызвать функцию:\n"
+                "extract_form_data(user_answer='NDA official version', question_type='template')\n\n"
+                "Не генерируйте Selenium код. Ваша единственная задача — получить название шаблона у пользователя."
             )
 
         elif state == PageState.DOCUMENT_FILLING:
             return (
-                "You are an automation copilot. Output ONLY executable Python code for Selenium 4 (no markdown, no backticks, no comments). "
-                "Environment: you already have variables `driver` (selenium.webdriver.Chrome) and `user_data` (dict with keys: "
-                "`document_name`, `document_language`, `document_number`, `project`). "
-                "Task: fill the preliminary form on https://app.conneto.com using values from `user_data` if the matching inputs exist, "
-                "then click the form's Submit/Next/Continue button and wait for the next page to load.\n"
-                "\n"
-                "Hard requirements:\n"
-                "- Use Selenium 4 WebDriverWait with expected_conditions (timeout 15s). "
-                "- Prefer CSS selectors; try multiple sensible selectors in order for each field. "
-                "- Do not print or return anything; just run the actions. "
-                "- For clicking, use element_to_be_clickable and `driver.execute_script('arguments[0].click();', btn)` as fallback.\n"
-                "\n"
-                "Inputs to try (in order):\n"
-                "- document name:  input[name='name'], input#documentName, input[placeholder*='Document name']\n"
-                "- language:       select[name='language'], div[role='combobox'][aria-label*='Language']\n"
-                "- number:         input[name='number'],  input#documentNumber\n"
-                "- project:        input[name='project'], div[role='combobox'][aria-label*='Project']\n"
-                "\n"
-                "Submit/Next buttons to try (XPaths, in order):\n"
-                "- //button[@type='submit']\n"
-                "- //button[contains(@class,'primary')]\n"
-                "- //button[contains(.,'Next') or contains(.,'Create') or contains(.,'Continue')]\n"
-                "- //*[@aria-label and (contains(@aria-label,'Next') or contains(@aria-label,'Continue'))]\n"
-                "\n"
-                "After clicking the button, wait for ANY of:\n"
-                "- URL change from the current URL; or\n"
-                "- Presence of a next-page element like: .editor-container, .document-editor, [data-page='editor']\n"
-                "\n"
-                "If no submit/next button is found/clickable after trying all selectors, raise: Exception('PRELIMINARY_DATA_SUBMIT_NOT_FOUND')."
+                "You are an automation copilot. Output ONLY executable Python code for Selenium 4.\n"
+                "Variables available: `driver`, `user_data` (dict: document_name, document_language, etc).\n"
+                "Task: Fill the form on the page.\n\n"
+
+                "CRITICAL RULES FOR SELECTORS:\n"
+                "1. NEVER target the Global Search bar. The generic 'input' often selects the Header Search.\n"
+                "2. ALWAYS check element ancestry: `not(ancestor::header)` and `not(ancestor::nav)`.\n"
+                "3. Use `placeholder` attributes that contain 'Document' or 'Name', NOT 'Search'.\n"
+                "4. Prefer finding the Form Container first: `form = driver.find_element(By.CSS_SELECTOR, 'main form')` then find inputs INSIDE it.\n\n"
+
+                "Code Pattern for Inputs:\n"
+                "try:\n"
+                "    # Locate Main Content Area first to avoid Header\n"
+                "    main_area = driver.find_element(By.CSS_SELECTOR, 'main, div[role=\"main\"], .page-content')\n"
+                "    name_input = main_area.find_element(By.CSS_SELECTOR, \"input[placeholder*='Name'], input[name='name']\")\n"
+                "    name_input.send_keys(user_data['document_name'])\n"
+                "except Exception:\n"
+                "    # Fallback only if scoped search fails\n"
+                "    pass\n\n"
+
+                "Fill all fields from `user_data` and click Continue/Next."
             )
-
-
-
 
         elif state == PageState.COMPLETION:
             return (
-                "You are finalizing the document creation process on https://app.conneto.com.\n\n"
+                "You are finalizing the document creation process on [https://app.conneto.com](https://app.conneto.com).\n\n"
                 "Your task is to:\n"
                 "- Verify that all required fields have been completed.\n"
                 "- Generate selenium code to submit the form or proceed to the next step.\n"
@@ -644,7 +687,8 @@ class MainAgent:
             print(f"🔍 FULL PROMPT PREVIEW: {prompt[:1000]}...")
 
             # Получаем динамическое системное сообщение
-            system_message = self._get_system_message_for_state(state) if state else self._get_system_message_for_state(PageState.LOGIN)
+            system_message = self._get_system_message_for_state(state) if state else self._get_system_message_for_state(
+                PageState.LOGIN)
 
             messages = [
                 SystemMessage(content=system_message),
@@ -677,11 +721,10 @@ class MainAgent:
             # ВАЖНО: Передаем системный промпт от MainAgent в LawyerAgent
             context_dict['system_prompt'] = self._get_system_message_for_state(state)
 
-
             # Если это первый запуск для PRELIMINARY_DATA, пробуем пакетный режим
             if (state == PageState.PRELIMINARY_DATA and
-                len(self.memory.user_responses) == 0 and
-                hasattr(self.lawyer_agent, 'collect_all_answers_batch')):
+                    len(self.memory.user_responses) == 0 and
+                    hasattr(self.lawyer_agent, 'collect_all_answers_batch')):
 
                 print(f"🎯 MAIN AGENT: Trying BATCH mode for faster data collection")
                 batch_result = self.lawyer_agent.collect_all_answers_batch(context_dict)
@@ -705,7 +748,8 @@ class MainAgent:
                     print(f"🎯 MAIN AGENT: BATCH questions asked, waiting for user input")
 
                     # Проверяем готовность ответа через GUI
-                    if hasattr(self, 'gui_instance') and self.gui_instance and hasattr(self.gui_instance, 'get_user_answer_if_ready'):
+                    if hasattr(self, 'gui_instance') and self.gui_instance and hasattr(self.gui_instance,
+                                                                                       'get_user_answer_if_ready'):
                         user_answer = self.gui_instance.get_user_answer_if_ready()
                         if user_answer:
                             print(f"🎯 MAIN AGENT: User answer received: '{user_answer[:50]}...'")
@@ -747,9 +791,9 @@ class MainAgent:
                     # ОТЛАДОЧНЫЕ ЛОГИ: отслеживаем все ответы пользователя
                     print(f"🔍 MAIN AGENT: Total user responses in memory: {len(self.memory.user_responses)}")
                     for i, resp in enumerate(self.memory.user_responses):
-                        print(f"🔍 MAIN AGENT: Response {i+1}: '{resp.question}' -> '{resp.answer}'")
+                        print(f"🔍 MAIN AGENT: Response {i + 1}: '{resp.question}' -> '{resp.answer}'")
 
-                # ВАЖНО: Получаем данные, извлеченные LawyerAgent через extract_form_data()
+                    # ВАЖНО: Получаем данные, извлеченные LawyerAgent через extract_form_data()
                     extracted = result.get("extracted_data") or context_dict.get("extracted_data")
                     if extracted:
                         if not hasattr(self, 'lawyer_extracted_data'):
@@ -759,7 +803,7 @@ class MainAgent:
                     # Сохраняем извлеченные данные для последующего использования
                     if not hasattr(self, 'lawyer_extracted_data'):
                         self.lawyer_extracted_data = {}
-                    self.lawyer_extracted_data.update(context_dict['extracted_data'])
+
                     print(f"🔍 MAIN AGENT: Total lawyer_extracted_data: {self.lawyer_extracted_data}")
 
                 # ОТЛАДОЧНЫЕ ЛОГИ: проверяем статус завершения
@@ -832,7 +876,8 @@ class MainAgent:
                     if field_match:
                         field_name = field_match.group(1)
                         user_data[field_name] = response.answer
-                        print(f"🔍 MAIN AGENT: Extracted field '{field_name}' with value '{response.answer}' from question: {response.question}")
+                        print(
+                            f"🔍 MAIN AGENT: Extracted field '{field_name}' with value '{response.answer}' from question: {response.question}")
                     else:
                         # Fallback на старый метод для совместимости
                         question_lower = response.question.lower()
@@ -844,8 +889,17 @@ class MainAgent:
                             user_data['document_number'] = response.answer
                         elif 'project' in question_lower or 'проект' in question_lower:
                             user_data['add_to_project'] = response.answer
+                        # === НОВОЕ: Обработка шаблона по ключевым словам ===
+                        elif 'шаблон' in question_lower or 'template' in question_lower:
+                            user_data['selected_template'] = response.answer
+                        # =================================================
 
             context_dict['user_data'] = user_data
+            # объединяем с тем, что накопил LawyerAgent
+            if hasattr(self, 'lawyer_extracted_data') and isinstance(self.lawyer_extracted_data, dict):
+                for k, v in self.lawyer_extracted_data.items():
+                    if v:
+                        user_data[k] = v
 
             # Отладочный вывод перед выполнением Selenium
             print(f"🔍 MAIN AGENT: Executing Selenium with user_data: {user_data}")
@@ -862,7 +916,7 @@ class MainAgent:
                 if self.memory.user_responses:
                     print(f"🔍 MAIN AGENT: Available responses:")
                     for i, resp in enumerate(self.memory.user_responses):
-                        print(f"🔍 MAIN AGENT:   {i+1}. Q: '{resp.question}' -> A: '{resp.answer}'")
+                        print(f"🔍 MAIN AGENT:   {i + 1}. Q: '{resp.question}' -> A: '{resp.answer}'")
                         # Проверяем триггеры
                         import re
                         field_match = re.search(r'\[FIELD:(\w+)\]', resp.question)
@@ -950,6 +1004,7 @@ class MainAgent:
         self.logger.info(f"GUI instance set for MainAgent: {gui_instance}")
         print(f"🔍 MAIN AGENT: GUI instance set: {gui_instance}")
 
+    # === ИСПРАВЛЕНО: Добавлен selected_template ===
     def extract_form_data(self, user_answer: str, question_type: str) -> Dict[str, str]:
         """Извлекает данные формы из ответа пользователя по типу вопроса"""
         print(f"🔍 EXTRACTING FORM DATA: answer='{user_answer}', type='{question_type}'")
@@ -962,9 +1017,13 @@ class MainAgent:
             return {"document_number": user_answer}
         elif question_type == "project":
             return {"add_to_project": user_answer}
+        elif question_type == "template":
+            return {"selected_template": user_answer}
         else:
             print(f"🔍 UNKNOWN QUESTION TYPE: {question_type}")
             return {}
+
+    # ==============================================
 
     def _parse_function_calls(self, ai_response: str) -> Dict[str, str]:
         """Парсит вызовы функции extract_form_data из ответа AI"""
@@ -995,7 +1054,7 @@ class MainAgent:
             question = response.question
             answer = response.answer.strip()
 
-            print(f"🔍 Response {i+1}: Q='{question}' A='{answer}'")
+            print(f"🔍 Response {i + 1}: Q='{question}' A='{answer}'")
 
             # Сначала пытаемся извлечь триггер поля
             import re
@@ -1050,6 +1109,14 @@ class MainAgent:
                     if answer and answer.lower() not in ["skip", "пропустить", "нет", "no", ""]:
                         user_data['add_to_project'] = answer
                         print(f"🔍 Found add_to_project: {answer}")
+                # === НОВОЕ: Шаблон ===
+                elif any(keyword in question_lower for keyword in [
+                    "шаблон", "template", "выберите шаблон"
+                ]):
+                    if answer and answer.lower() not in ["skip", "пропустить", "нет", "no", ""]:
+                        user_data['selected_template'] = answer
+                        print(f"🔍 Found selected_template: {answer}")
+                # =======================
 
         print(f"🔍 FINAL EXTRACTED USER DATA: {user_data}")
         return user_data
@@ -1058,6 +1125,27 @@ class MainAgent:
         """Проверяет, собраны ли все обязательные поля для текущего состояния"""
         required_fields = ["document_name", "document_language"]
         collected_fields = []
+
+        # === НОВОЕ: Проверка для TEMPLATE_SELECTION ===
+        if self.memory.current_state == PageState.TEMPLATE_SELECTION:
+            has_template = False
+
+            # Ищем в данных, извлеченных LawyerAgent
+            if hasattr(self, 'lawyer_extracted_data') and 'selected_template' in self.lawyer_extracted_data:
+                has_template = True
+
+            # Ищем в ответах пользователя по ключевым словам или триггерам
+            for resp in self.memory.user_responses:
+                # Поле 'template'
+                if "[FIELD:template]" in resp.question or "selected_template" in resp.question or "шаблон" in resp.question.lower():
+                    if resp.answer and resp.answer.lower() not in ["no answer provided", "skip", "пропустить", "нет",
+                                                                   "no", ""]:
+                        has_template = True
+                        break
+
+            print(f"🔍 TEMPLATE SELECTION CHECK: Has template? {has_template}")
+            return has_template
+        # =============================================
 
         for response in self.memory.user_responses:
             question = response.question
@@ -1077,7 +1165,7 @@ class MainAgent:
 
                 # Проверяем разные варианты вопросов (без подчёркиваний)
                 if (any(keyword in question_lower for keyword in ["название", "document name", "title"]) or
-                    "название файла" in question_lower):
+                        "название файла" in question_lower):
                     if answer_lower and answer_lower not in ["skip", "пропустить", "нет", "no", ""]:
                         collected_fields.append("document_name")
                         print(f"🔍 Found document_name from question: '{question_lower}' -> '{answer_lower}'")
@@ -1094,11 +1182,11 @@ class MainAgent:
         print(f"🔍 ALL COLLECTED: {all_collected}")
         return all_collected
 
-
-
     def _generate_single_field_code(self, field_name: str, field_value: str, context: PageContext) -> str:
-        """Генерирует Selenium код для заполнения одного поля"""
-        if field_name == "document_name":
+        """Генерирует Selenium код для заполнения одного поля с защитой от попадания в Header/Search"""
+
+        # === НОВОЕ: Логика выбора шаблона ===
+        if field_name == "selected_template":
             return f"""
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -1107,34 +1195,165 @@ from selenium.common.exceptions import TimeoutException
 import time
 
 wait = WebDriverWait(driver, 15)
+target_template = "{field_value}".strip()
+print(f"🔍 Searching for template: {{target_template}}")
 
 try:
-    # Ищем поле для названия документа
-    selectors = [
-        "input[placeholder*='Document name']",
-        "input[name*='document']", 
-        "input[name*='name']",
-        "input[placeholder*='name']",
-        "input[type='text']"
-    ]
-    
-    document_name_input = None
-    for selector in selectors:
+    # Стратегия 1: Ищем элемент (например, <h2>, <h4>), содержащий точное название шаблона.
+    # Затем ищем кнопку "Select" в пределах родительского контейнера.
+    xpath_text = f"//*[contains(translate(normalize-space(text()), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '{{target_template.lower()}}')]"
+
+    # Пытаемся найти кнопку в родительском элементе, который содержит текст. 
+    # Этот XPath ищет кнопку "Select" в контейнере-предке, который находится близко к тексту.
+    # Используем normalize-space() для обрезки пробелов.
+    xpath_btn = f"//div[.//text()[normalize-space(.)='{{target_template}}']]/descendant::button[contains(., 'Select')]"
+
+    # Более общий XPath, который ищет кнопку "Select" рядом с текстом
+    xpath_alt = f"//button[contains(., 'Select') and (ancestor::div[.//text()[contains(., '{{target_template}}')]] or preceding::*[contains(., '{{target_template}}')])]"
+
+    btn = None
+
+    try:
+        # Пробуем прямой поиск по точному тексту в контейнере
+        btn = wait.until(EC.element_to_be_clickable((By.XPATH, xpath_btn)))
+        print("✅ Found template button via Specific Row XPath")
+    except TimeoutException:
+         try:
+            # Пробуем более широкий поиск (на случай, если текст не в контейнере)
+            btn = wait.until(EC.element_to_be_clickable((By.XPATH, xpath_alt)))
+            print("✅ Found template button via Broad Text Search XPath")
+         except TimeoutException:
+            pass
+
+    if btn:
+        driver.execute_script("arguments[0].scrollIntoView({{block: 'center'}});", btn)
+        time.sleep(1)
         try:
-            document_name_input = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, selector)))
-            break
-        except TimeoutException:
-            continue
-    
-    if document_name_input:
-        document_name_input.clear()
-        document_name_input.send_keys("{field_value}")
-        print(f"✅ Document name filled: {field_value}")
+            btn.click()
+        except:
+            driver.execute_script("arguments[0].click();", btn)
+        print(f"✅ Clicked 'Select template' for: {{target_template}}")
     else:
-        print("❌ Document name input not found")
-        
+        raise Exception(f"TEMPLATE_BUTTON_NOT_FOUND: Could not find 'Select template' button for '{{target_template}}'")
+
 except Exception as e:
-    print(f"❌ Error filling document name: {{e}}")
+    print(f"❌ Error selecting template: {{e}}")
+    raise e
+
+"""
+        # =======================================================
+        elif field_name == "document_name":
+            return f"""
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException, NoSuchElementException, StaleElementReferenceException
+import time
+
+wait = WebDriverWait(driver, 15)
+
+def is_element_in_header(element):
+    try:
+        # Проверка 1: Поиск родителя header или nav
+        parent = element.find_element(By.XPATH, "./ancestor::header | ./ancestor::nav | ./ancestor::*[contains(@class, 'header')] | ./ancestor::*[contains(@class, 'navbar')]")
+        return True
+    except NoSuchElementException:
+        pass
+
+    # Проверка 2: Атрибуты самого элемента намекают на поиск
+    outer_html = element.get_attribute("outerHTML").lower()
+    if "search" in outer_html or "poisk" in outer_html:
+        return True
+
+    return False
+
+try:
+    print(f"🔄 Attempting to fill Document Name: {{field_value}}")
+
+    # 1. Сначала ищем по очень специфичным плейсхолдерам, которые точно не поиск
+    precise_selectors = [
+        "input[placeholder*='Document name' i]",
+        "input[placeholder*='Name of document' i]",
+        "input[placeholder*='Contract title' i]",
+        "input[name='document_name']", # Часто уникальное имя
+        "input[id='documentName']"
+    ]
+
+    target_input = None
+
+    # Попытка найти точный инпут
+    for sel in precise_selectors:
+        try:
+            elements = driver.find_elements(By.CSS_SELECTOR, sel)
+            for el in elements:
+                if el.is_displayed() and not is_element_in_header(el):
+                    target_input = el
+                    print(f"✅ Found by precise selector: {{sel}}")
+                    break
+            if target_input: break
+        except: continue
+
+    # 2. Если точный не найден, ищем через Label (самый надежный способ для форм)
+    if not target_input:
+        try:
+            # XPath: найти label с текстом "Name" или "Title", взять следующий input
+            xpath = "//label[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'name') or contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'title')]/following::input[1]"
+            elements = driver.find_elements(By.XPATH, xpath)
+            for el in elements:
+                if el.is_displayed() and not is_element_in_header(el):
+                    target_input = el
+                    print(f"✅ Found by Label association")
+                    break
+        except: pass
+
+    # 3. Fallback: Ищем внутри контейнера формы, исключая header
+    if not target_input:
+        try:
+            # Находим контейнер формы, исключая навигацию
+            container = driver.find_element(By.CSS_SELECTOR, "main, form, div[class*='content'], div[class*='page-body']")
+            inputs = container.find_elements(By.TAG_NAME, "input")
+
+            for inp in inputs:
+                if not inp.is_displayed(): continue
+                if inp.get_attribute("type") in ["hidden", "checkbox", "radio", "submit", "button"]: continue
+
+                # Пропускаем, если это поиск
+                if is_element_in_header(inp): continue
+
+                # Если это текстовое поле в контенте, берем первое (обычно это Name)
+                target_input = inp
+                print(f"⚠️ Used fallback container search")
+                break
+        except: pass
+
+    if target_input is None:
+        raise Exception("DOCUMENT_NAME_INPUT_NOT_FOUND: Could not locate a valid input field outside of header")
+
+    # 4. Ввод значения с очисткой
+    driver.execute_script("arguments[0].scrollIntoView({{block: 'center'}});", target_input)
+    time.sleep(0.5)
+
+    try:
+        target_input.click()
+    except:
+        driver.execute_script("arguments[0].click();", target_input)
+
+    target_input.clear()
+
+    # Эмуляция посимвольного ввода для React/Vue форм
+    target_input.send_keys("{field_value}")
+
+    # Проверка (Assertion)
+    val = target_input.get_attribute("value")
+    if val != "{field_value}":
+        print(f"⚠️ Value mismatch via send_keys. Trying JS set.")
+        driver.execute_script("arguments[0].value = '{field_value}'; arguments[0].dispatchEvent(new Event('input', {{ bubbles: true }}));", target_input)
+
+    print(f"✅ Document name successfully filled: {{field_value}}")
+
+except Exception as e:
+    print(f"❌ Error filling document name: {{str(e)}}")
+    raise e
 """
 
         elif field_name == "document_language":
@@ -1142,60 +1361,39 @@ except Exception as e:
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException
 import time
 
 wait = WebDriverWait(driver, 15)
-
 try:
-    # Ищем dropdown для языка
-    dropdown_selectors = [
-        ".vs__dropdown-toggle",
-        "[role='combobox']", 
-        ".g-select-search__wrapper",
-        "select",
-        ".dropdown-toggle"
-    ]
-    
-    language_dropdown = None
-    for selector in dropdown_selectors:
+    print(f"🔄 Selecting language: {{field_value}}")
+    # Ищем dropdown, исключая хедер
+    dropdowns = driver.find_elements(By.CSS_SELECTOR, ".vs__dropdown-toggle, [role='combobox'], .g-select-search__wrapper, select")
+
+    target_dd = None
+    for dd in dropdowns:
+        # Простая проверка: дропдаун не должен быть в хедере
         try:
-            language_dropdown = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, selector)))
-            break
-        except TimeoutException:
-            continue
-    
-    if language_dropdown:
-        # Кликаем на dropdown
-        driver.execute_script("arguments[0].click();", language_dropdown)
-        time.sleep(1)
-        
-        # Ищем опцию с нужным языком
-        option_xpath_selectors = [
-            "//li[@role='option' and contains(text(), '{field_value}')]",
-            "//option[contains(text(), '{field_value}')]",
-            "//*[@role='option' and contains(text(), '{field_value}')]", 
-            "//li[contains(text(), '{field_value}')]"
-        ]
-        
-        language_option = None
-        for xpath in option_xpath_selectors:
-            try:
-                language_option = wait.until(EC.element_to_be_clickable((By.XPATH, xpath)))
+            dd.find_element(By.XPATH, "./ancestor::header")
+            continue 
+        except: 
+            if dd.is_displayed():
+                target_dd = dd
                 break
-            except TimeoutException:
-                continue
-        
-        if language_option:
-            driver.execute_script("arguments[0].click();", language_option)
-            print(f"✅ Document language selected: {field_value}")
-        else:
-            print(f"❌ Language option '{field_value}' not found")
+
+    if target_dd:
+        driver.execute_script("arguments[0].scrollIntoView({{block: 'center'}});", target_dd)
+        driver.execute_script("arguments[0].click();", target_dd)
+        time.sleep(1)
+
+        # Клик по опции
+        xpath = f"//li[contains(text(), '{{field_value}}')] | //div[contains(text(), '{{field_value}}')] | //option[contains(text(), '{{field_value}}')]"
+        option = wait.until(EC.element_to_be_clickable((By.XPATH, xpath)))
+        option.click()
+        print(f"✅ Language selected")
     else:
-        print("❌ Document language dropdown not found")
-        
+        print("❌ Language dropdown not found")
 except Exception as e:
-    print(f"❌ Error selecting document language: {{e}}")
+    print(f"❌ Error selecting language: {{e}}")
 """
 
         else:
@@ -1223,7 +1421,7 @@ try:
         "button.btn-primary",
         "button.btn"
     ]
-    
+
     # Затем XPath селекторы
     continue_xpath_selectors = [
         "//button[contains(text(), 'Continue')]",
@@ -1234,9 +1432,9 @@ try:
         "//input[@value='Submit']",
         "//input[@value='Next']"
     ]
-    
+
     continue_button = None
-    
+
     # Пробуем CSS селекторы
     for selector in continue_css_selectors:
         try:
@@ -1244,7 +1442,7 @@ try:
             break
         except TimeoutException:
             continue
-    
+
     # Если CSS не сработал, пробуем XPath
     if not continue_button:
         for xpath in continue_xpath_selectors:
@@ -1253,7 +1451,7 @@ try:
                 break
             except TimeoutException:
                 continue
-    
+
     if continue_button:
         driver.execute_script("arguments[0].scrollIntoView(true);", continue_button)
         time.sleep(1)
@@ -1261,14 +1459,10 @@ try:
         print("✅ Continue button clicked successfully")
     else:
         print("❌ Continue button not found")
-        
+
 except Exception as e:
     print(f"❌ Error clicking continue button: {e}")
 """
-
-
-
-
 
     def get_status(self) -> Dict[str, Any]:
         """Возвращает текущий статус агента"""
