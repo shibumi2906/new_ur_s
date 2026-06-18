@@ -1268,7 +1268,7 @@ def is_element_in_header(element):
     return False
 
 try:
-    print(f"🔄 Attempting to fill Document Name: {{field_value}}")
+    print(f"🔄 Attempting to fill Document Name: {field_value}")
 
     # 1. Сначала ищем по очень специфичным плейсхолдерам, которые точно не поиск
     precise_selectors = [
@@ -1349,7 +1349,7 @@ try:
         print(f"⚠️ Value mismatch via send_keys. Trying JS set.")
         driver.execute_script("arguments[0].value = '{field_value}'; arguments[0].dispatchEvent(new Event('input', {{ bubbles: true }}));", target_input)
 
-    print(f"✅ Document name successfully filled: {{field_value}}")
+    print(f"✅ Document name successfully filled: {field_value}")
 
 except Exception as e:
     print(f"❌ Error filling document name: {{str(e)}}")
@@ -1365,7 +1365,7 @@ import time
 
 wait = WebDriverWait(driver, 15)
 try:
-    print(f"🔄 Selecting language: {{field_value}}")
+    print(f"🔄 Selecting language: {field_value}")
     # Ищем dropdown, исключая хедер
     dropdowns = driver.find_elements(By.CSS_SELECTOR, ".vs__dropdown-toggle, [role='combobox'], .g-select-search__wrapper, select")
 

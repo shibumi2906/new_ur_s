@@ -100,22 +100,35 @@ python gui_agent.py
 
 ## 📁 Структура проекта
 ```
-├── agents/
-│   ├── main_agent.py
-│   ├── navigator_agent.py
-│   ├── prompt_generator_agent.py
-│   └── lawyer_agent.py
-├── tools/
-│   ├── selenium_tool.py
-│   ├── page_context_tool.py
-│   └── error_fix_tool.py
-├── memory/
-│   └── agent_memory.py
-├── gui_agent.py
-├── config.py
-├── models.py
-├── logger.py
-└── requirements.txt
+agents/
+├── __init__.py
+├── lawyer_agent.py
+├── main_agent.py
+├── navigator_agent.py
+└── prompt_generator_agent.py
+
+tools/
+├── __init__.py
+├── error_fix_tool.py
+├── page_context_tool.py
+├── preliminary_data_tool.py
+└── selenium_tool.py
+
+memory/
+└── agent_memory.py
+
+logs/
+.env
+.env.example
+env_example.txt
+__init__.py
+config.py
+gui_agent.py
+logger.py
+main2.py
+models.py
+README.md
+requirements.txt
 ```
 
 ## 🔄 Состояния агента
@@ -139,12 +152,7 @@ python gui_agent.py
 - Нестабильные селекторы на некоторых страницах — промпты включают несколько XPath/CSS и fallback через JS-клик.
 - Если список доступных языков формируется динамически, LawyerAgent может запросить уточнение языка у пользователя.
 
-## 🤝 Вклад
 
-1. Форкните репозиторий
-2. Создайте ветку для новой функции
-3. Внесите изменения
-4. Создайте Pull Request
 
 ## 📄 Лицензия
 
