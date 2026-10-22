@@ -3,27 +3,28 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+
 class Config:
     # OpenAI Configuration
-    OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "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")
-    
+    OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+
     # Proxy Configuration
-    PROXY_URL = os.getenv("PROXY_URL", "http://user179631:g7340x@166.1.76.142:1196")
-    
+    PROXY_URL = os.getenv("PROXY_URL", "")
+
     # Default Credentials
-    DEFAULT_EMAIL = os.getenv("DEFAULT_EMAIL", "kseniya.194901@gmail.com")
-    DEFAULT_PASSWORD = os.getenv("DEFAULT_PASSWORD", "Stas_2001")
-    
+    DEFAULT_EMAIL = os.getenv("DEFAULT_EMAIL", "")
+    DEFAULT_PASSWORD = os.getenv("DEFAULT_PASSWORD", "")
+
     # Base URL
     BASE_URL = os.getenv("BASE_URL", "https://app.conneto.com/")
-    
+
     # Selenium Configuration
-    SELENIUM_TIMEOUT = 20
-    MAX_RETRIES = 3
-    
+    SELENIUM_TIMEOUT = int(os.getenv("SELENIUM_TIMEOUT", "20"))
+    MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
+
     # LLM Configuration
-    LLM_MODEL = "gpt-4o"
-    LLM_TEMPERATURE = 0.3
-    
+    LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o")
+    LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.3"))
+
     # Memory Configuration
-    MAX_MEMORY_ITEMS = 10 
+    MAX_MEMORY_ITEMS = int(os.getenv("MAX_MEMORY_ITEMS", "10"))
